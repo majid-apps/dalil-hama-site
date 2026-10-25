@@ -1,0 +1,1877 @@
+#!/usr/bin/env bash
+# دليل حماة — تشغيل الموقع الجديد على سيرفر majid.cfd خلف Caddy، مع تحديث تلقائي ورجوع فوري.
+#
+# أول مرة، على السيرفر:
+#   curl -fsSL <رابط هذا الملف> -o /tmp/dalil-hama-site && sudo bash /tmp/dalil-hama-site install
+#
+# بعد التثبيت:
+#   sudo dalil-hama-site status     حالة الموقع والتحديث
+#   sudo dalil-hama-site update     جلب آخر إصدار الآن (يجري تلقائياً كل 10 دقائق)
+#   sudo dalil-hama-site previous   الرجوع إلى الإصدار السابق وإيقاف التحديث التلقائي
+#   sudo dalil-hama-site resume     استئناف التحديث التلقائي
+#   sudo dalil-hama-site rollback   إعادة النطاق إلى الموقع القديم فوراً
+#
+# قاعدة البيانات على السيرفر نفسه (PostgreSQL المحلي، مع PostgREST للبيانات وGoTrue لدخول المشرفين):
+#   sudo dalil-hama-site install-db                 أول مرة: يطلب مفتاح النقل، ثم ينقل البيانات من Supabase ويحوّل الموقع إليها
+#   sudo dalil-hama-site install-db                 بعد النقل: تحديث الخدمات والمخطط (لا يمس البيانات)
+#   sudo dalil-hama-site install-db --replace       نقل جديد من Supabase يحل محل قاعدة السيرفر (بعد db-rollback، مع نسخة احتياطية قبله)
+#   sudo dalil-hama-site backup                     نسخة احتياطية الآن (تجري تلقائياً كل ليلة)
+#   sudo dalil-hama-site db-restore [FILE]          استرجاع آخر نسخة احتياطية (أو FILE) مكان قاعدة السيرفر
+#   sudo dalil-hama-site db-rollback                إعادة الموقع إلى Supabase
+#
+# لا يمس هذا الأمر الموقعَ القديم (خدمة dalil-hama وقاعدة بياناتها dalil) ولا مواقع Caddy الأخرى:
+# يستبدل كتلة dalil-hama.majid.cfd وحدها بسطر import، ويحفظ نسخة منها لإعادتها عند الرجوع.
+set -Eeuo pipefail
+umask 022
+
+HOST=${DH_HOST:-dalil-hama.majid.cfd}
+REPO=${DH_REPO:-majid-apps/dalil-hama-site}
+BRANCH=${DH_BRANCH:-main}
+SUBDIR=dalil-hama/public
+BASE=${DH_BASE:-/var/www/dalil-hama}
+STATE=${DH_STATE:-/var/lib/dalil-hama-site}
+ETC=${DH_ETC:-/etc/dalil-hama-site}
+CONF=$ETC/config
+SITE_CONF=$ETC/site.caddy
+CADDYFILE=${DH_CADDYFILE:-}
+SELF_DST=${DH_SELF_DST:-/usr/local/sbin/dalil-hama-site}
+UNIT_DIR=${DH_UNIT_DIR:-/etc/systemd/system}
+UNIT=dalil-hama-site-update
+SITE_USER=${DH_SITE_USER:-dalil-site}
+KEEP=5
+PORT=${DH_VERIFY_PORT:-443}
+
+# ─── قاعدة البيانات على السيرفر ───
+OPT=${DH_OPT:-/opt/dalil-hama-site}
+API_USER=${DH_API_USER:-dalil-api}
+DB=dalil_hama
+API_PORT=${DH_API_PORT:-8031}
+AUTH_PORT=${DH_AUTH_PORT:-8032}
+BACKUP_DIR=${DH_BACKUP_DIR:-/var/backups/dalil-hama-site}
+BACKEND_FLAG=$ETC/backend-local
+OVERRIDE=$BASE/override
+# القاعدة المنقولة تُبنى أولاً باسم ${DB}_new ثم تأخذ اسم $DB
+HBA_LINE="host $DB,${DB}_new authenticator,supabase_auth_admin 127.0.0.1/32 scram-sha-256"
+PGRST_VERSION=v13.0.7
+AUTH_VERSION=v2.197.0
+# بصمات الملفات الرسمية (x86_64 ثم aarch64)
+PGRST_SHA_X86=4153f81ccc40e7b735edc89cd84b49da25ba27eb37d57c7f6a82c9005a0b762b
+PGRST_SHA_ARM=ded5ac7f15f6655df4bb8911e5d3f50500b26d95e150e6f48009f0dfc1df6748
+AUTH_SHA_X86=9daff5d1939c3142a1586e435e6e2a7a2f71534ec40ff1b196b59b83ad5678f3
+AUTH_SHA_ARM=b129d0b32520a975a4f0576eb1b7836b82043997d2d021676ff24cec54eb5381
+SUPABASE_URL=https://jhgwzynxkioqfyoldoyx.supabase.co
+SUPABASE_KEY=sb_publishable_yeVd8p763PpAv9P8RYF3PQ_wJVYKNop
+read -r -a VERIFY_OPTS <<< "${DH_VERIFY_CURL_OPTS:-}"
+MARKER='# dalil-hama-site: الموقع الجديد لدليل حماة. للرجوع إلى القديم: sudo dalil-hama-site rollback'
+QUIET=0
+TMP=
+EXPORT_LEFT=0
+
+cleanup() {
+  [ -n "$TMP" ] && rm -rf -- "$TMP"
+  # نسخة البيانات المنقولة فيها بصمات كلمات مرور المشرفين: لا تبقى على القرص بعد انتهاء الأمر
+  [ "$EXPORT_LEFT" = 1 ] && shred_export
+  return 0
+}
+trap cleanup EXIT
+
+say()  { [ "$QUIET" = 1 ] || printf '%s\n' "$*" || true; }
+ok()   { say "✓ $*"; }
+warn() { printf '! %s\n' "$*" >&2 || true; }
+die()  {
+  # أخطاء التحديث التلقائي تُحفظ ليعرضها أمر status
+  if [ -n "${ERRLOG:-}" ]; then printf '%s  %s\n' "$(date -u +%FT%TZ)" "$*" > "$ERRLOG" 2>/dev/null || true; fi
+  printf '✗ %s\n' "$*" >&2 || true
+  exit 1
+}
+
+need_root() { [ "$(id -u)" -eq 0 ] || die "شغّل الأمر بصلاحية الجذر: sudo $0 $*"; }
+
+need_tools() {
+  local t
+  for t in "$@"; do command -v "$t" >/dev/null 2>&1 || die "الأداة $t غير مثبّتة على السيرفر"; done
+}
+
+is_sha() { [[ ${1:-} =~ ^[0-9a-f]{40}$ ]]; }
+
+# إعدادات اختيارية في $CONF بصيغة KEY=VALUE (REPO وBRANCH فقط)، تُقرأ ولا تُنفَّذ
+load_conf() {
+  [ -r "$CONF" ] || return 0
+  local line key val
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%$'\r'}
+    [[ $line =~ ^[[:space:]]*(REPO|BRANCH)[[:space:]]*=(.*)$ ]] || continue
+    key=${BASH_REMATCH[1]}
+    val=${BASH_REMATCH[2]%%[[:space:]]#*}
+    val=$(printf '%s' "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e "s/^[\"']//" -e "s/[\"']\$//")
+    case $key in
+      REPO)
+        if [[ $val =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then [ -n "${DH_REPO:-}" ] || REPO=$val
+        else warn "تجاهلت السطر REPO=$val في $CONF"; fi ;;
+      BRANCH)
+        if [[ $val =~ ^[A-Za-z0-9._/-]+$ ]]; then [ -n "${DH_BRANCH:-}" ] || BRANCH=$val
+        else warn "تجاهلت السطر BRANCH=$val في $CONF"; fi ;;
+    esac
+  done < "$CONF"
+  return 0
+}
+
+take_lock() {
+  mkdir -p "$BASE"
+  exec 9>>"$BASE/.lock"
+  flock -w 300 9 || die "عملية أخرى للموقع قيد التنفيذ؛ أعد المحاولة بعد قليل"
+}
+
+remote_sha() {
+  local out=
+  if [ -n "${DH_SOURCE_SHA:-}" ]; then out=$DH_SOURCE_SHA
+  else
+    if command -v git >/dev/null 2>&1; then
+      out=$(GIT_TERMINAL_PROMPT=0 timeout 60 git ls-remote "https://github.com/$REPO.git" "refs/heads/$BRANCH" 2>/dev/null | awk 'NR==1{print $1}') || out=
+    fi
+    if ! is_sha "$out"; then
+      out=$(curl -fsSL --connect-timeout 20 --max-time 60 -H 'Accept: application/vnd.github.sha' \
+        "https://api.github.com/repos/$REPO/commits/$BRANCH" 2>/dev/null) || out=
+    fi
+  fi
+  is_sha "$out" || return 1
+  printf '%s\n' "$out"
+}
+
+current_sha() {
+  local t
+  t=$(readlink "$BASE/current" 2>/dev/null) || return 1
+  t=${t##*/}
+  is_sha "$t" || return 1
+  printf '%s\n' "$t"
+}
+
+# الإصدار الذي يعرضه Caddy فعلاً: من السيرفر نفسه أولاً (دون أي وكيل)، ثم عبر العنوان العام
+# إن تعذّر الاتصال المحلي. ردّ HTTP بخطأ (404 من الموقع القديم مثلاً) يعني أن الموقع الجديد غير معروض.
+served_sha() {
+  local out rc url="https://$HOST:$PORT/release.txt"
+  out=$(curl -fsS --noproxy '*' --connect-timeout 3 --max-time 6 ${VERIFY_OPTS[@]+"${VERIFY_OPTS[@]}"} \
+          -H 'Cache-Control: no-cache' --resolve "$HOST:$PORT:127.0.0.1" "$url" 2>/dev/null) && rc=0 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    [ "$rc" -eq 22 ] && return 1
+    out=$(curl -fsS --connect-timeout 5 --max-time 8 ${VERIFY_OPTS[@]+"${VERIFY_OPTS[@]}"} \
+            -H 'Cache-Control: no-cache' "$url" 2>/dev/null) || return 1
+  fi
+  out=${out//[$'\r\n\t ']/}
+  is_sha "$out" || return 1
+  printf '%s\n' "$out"
+}
+
+wait_served() {
+  local until=$((SECONDS + 30))
+  while [ "$SECONDS" -lt "$until" ]; do
+    [ "$(served_sha || true)" = "$1" ] && return 0
+    sleep 1
+  done
+  return 1
+}
+
+# إصدار مرفوض يُعلَّم فلا يُعاد تنزيله كل 10 دقائق ما دام رأس الفرع لم يتغير
+reject_release() {
+  printf '%s\n' "$2" > "$BASE/bad-$1" 2>/dev/null || true
+  die "الإصدار ${1:0:7} مرفوض: $2؛ الموقع باقٍ على الإصدار الحالي"
+}
+
+# صفحات فيها <script> مضمَّن (غير JSON): سياسة أمان المحتوى على السيرفر تمنع تشغيله
+inline_scripts() {
+  python3 - "$1" <<'PY'
+import os, re, sys
+root, bad = sys.argv[1], []
+for d, _, fs in os.walk(root):
+    for f in fs:
+        if not f.endswith('.html'): continue
+        p = os.path.join(d, f)
+        for a in re.findall(r'<script\b([^>]*)>', open(p, encoding='utf-8', errors='replace').read(), re.I):
+            if re.search(r'\bsrc\s*=', a, re.I) or re.search(r'type\s*=\s*["\']?application/(ld\+)?json', a, re.I):
+                continue
+            bad.append(os.path.relpath(p, root)); break
+print(' '.join(sorted(bad)))
+PY
+}
+
+# بصمة محتوى الإصدار (دون release.txt)، لتمييز الإصدارات التي لم تغيّر ملفات الموقع
+release_digest() {
+  (cd "$1" && find . -type f ! -name release.txt -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum) |
+    sha256sum | cut -c1-64
+}
+
+# ينزّل الإصدار ويتحقق منه في مجلد مؤقت، ثم ينقله دفعة واحدة إلى releases/<sha>
+fetch_release() {
+  local sha=$1 dir=$BASE/releases/$1 f bad
+  if [ -d "$dir" ]; then
+    if [ -f "$BASE/releases/$sha.migrations" ] || [ "$sha" = "$(current_sha || true)" ]; then return 0; fi
+    # مجلد بلا قائمة مخطط (من نسخة أقدم من هذا الأمر): يُنزَّل من جديد كي لا يُتجاوز فحص المخطط
+    rm -rf -- "$dir"
+  fi
+  mkdir -p "$BASE/releases"
+  # بقايا تنزيل انقطع (إعادة تشغيل أو إيقاف قسري)؛ القفل بأيدينا فلا تنزيل آخر جارٍ
+  rm -rf -- "$BASE"/.tmp.*
+  TMP=$(mktemp -d "$BASE/.tmp.XXXXXX")
+  if [ -n "${DH_SOURCE_TARBALL:-}" ]; then
+    cp -- "$DH_SOURCE_TARBALL" "$TMP/src.tgz"
+  else
+    curl -fsSL --retry 3 --retry-delay 3 --connect-timeout 20 --max-time 300 -o "$TMP/src.tgz" \
+      "https://codeload.github.com/$REPO/tar.gz/$sha" || die "تعذّر تنزيل الإصدار ${sha:0:7} من GitHub"
+  fi
+  mkdir "$TMP/site"
+  if ! tar -xzf "$TMP/src.tgz" -C "$TMP/site" --no-same-owner --no-same-permissions \
+       --wildcards --strip-components=3 "*/$SUBDIR/*" 2>"$TMP/tar.log"; then
+    if grep -q 'Not found in archive' "$TMP/tar.log"; then reject_release "$sha" "لا يحوي مجلد $SUBDIR"; fi
+    die "تعذّر فك الإصدار ${sha:0:7}: $(head -n 1 "$TMP/tar.log")"
+  fi
+  # ملفات ومجلدات عادية فقط
+  find "$TMP/site" -mindepth 1 ! -type f ! -type d -delete
+  for f in index.html admin/index.html sw.js manifest.webmanifest assets/js/app.js assets/js/admin.js \
+           assets/js/core.js assets/js/search.js assets/js/config.js assets/css/app.css; do
+    [ -s "$TMP/site/$f" ] || reject_release "$sha" "ملف ناقص ($f)"
+  done
+  grep -q '/assets/js/app.js' "$TMP/site/index.html" || reject_release "$sha" "الصفحة الرئيسية غير صالحة"
+  bad=$(inline_scripts "$TMP/site") || bad="(تعذّر الفحص)"
+  [ -z "$bad" ] || reject_release "$sha" "فيه سكربت مضمَّن تمنعه سياسة الأمان ($bad)"
+  printf '%s\n' "$sha" > "$TMP/site/release.txt"
+  find "$TMP/site" -type d -exec chmod 755 {} +
+  find "$TMP/site" -type f -exec chmod 644 {} +
+  # ملفات مخطط قاعدة البيانات التي يتطلبها هذا الإصدار (للتحقق قبل تفعيله على قاعدة السيرفر)،
+  # تُكتب قبل نقل المجلد: مجلد بلا قائمة لا يظهر أبداً حتى لو انقطع الأمر بينهما
+  { tar -tzf "$TMP/src.tgz" --wildcards "*/dalil-hama/supabase/migrations/*.sql" 2>/dev/null || true; } |
+    sed 's#.*/##' | LC_ALL=C sort > "$TMP/migrations"
+  chmod 644 "$TMP/migrations"
+  mv -f -- "$TMP/migrations" "$BASE/releases/$sha.migrations"
+  mv -T "$TMP/site" "$dir"
+  rm -rf -- "$TMP"; TMP=
+}
+
+# ملفات مخطط يتطلبها الإصدار ولم تُطبَّق على قاعدة السيرفر بعد (فارغ إن لم ينقص شيء)
+missing_migrations() {
+  [ -f "$BACKEND_FLAG" ] && [ -s "$BASE/releases/$1.migrations" ] || return 0
+  LC_ALL=C comm -23 "$BASE/releases/$1.migrations" <(LC_ALL=C sort "$ETC/applied-migrations" 2>/dev/null) | tr '\n' ' '
+}
+
+# سجل الإصدارات المعروضة (الأحدث آخراً)، يرجع خلاله أمر previous خطوة خطوة
+ensure_history() {
+  [ -s "$BASE/history" ] && return 0
+  local cur prev
+  cur=$(current_sha) || return 0
+  prev=$(cat "$BASE/previous" 2>/dev/null) || prev=
+  {
+    if is_sha "$prev" && [ "$prev" != "$cur" ] && [ -d "$BASE/releases/$prev" ]; then printf '%s\n' "$prev"; fi
+    printf '%s\n' "$cur"
+  } > "$BASE/history"
+  rm -f -- "$BASE/previous"
+}
+
+# تبديل ذري للرابط current؛ record=1 يضع الإصدار في آخر السجل
+activate() {
+  local sha=$1 record=${2:-1} cur
+  cur=$(current_sha) || cur=
+  if [ "$cur" != "$sha" ]; then
+    ln -sfn "releases/$sha" "$BASE/.current.new"
+    mv -Tf "$BASE/.current.new" "$BASE/current"
+  fi
+  write_override
+  if [ "$record" = 1 ]; then
+    { grep -vx -- "$sha" "$BASE/history" 2>/dev/null || true; printf '%s\n' "$sha"; } | tail -n 20 > "$BASE/history.new"
+    mv -f -- "$BASE/history.new" "$BASE/history"
+  fi
+  return 0
+}
+
+# يُبقي الإصدار الحالي والمثبّت وآخر $KEEP إصدارات في السجل، ويحذف ما عداها
+prune() {
+  local keep cur d s
+  cur=$(current_sha) || cur=
+  keep=" $cur $(cat "$BASE/PINNED" 2>/dev/null || true) $(tail -n "$KEEP" "$BASE/history" 2>/dev/null | tr '\n' ' ') "
+  for d in "$BASE"/releases/*/; do
+    d=${d%/}; s=${d##*/}
+    is_sha "$s" || continue
+    case $keep in *" $s "*) continue ;; esac
+    rm -rf -- "${BASE:?}/releases/$s"
+    rm -f -- "${BASE:?}/releases/$s.migrations"
+  done
+  return 0
+}
+
+fix_owner() {
+  if [ "$(id -u)" -eq 0 ] && id "$SITE_USER" >/dev/null 2>&1; then
+    chown -R "$SITE_USER:$SITE_USER" "$BASE"
+  fi
+}
+
+# ─────────── Caddy ───────────
+
+detect_caddy() {
+  need_tools caddy systemctl
+  systemctl is-active --quiet caddy || die "خدمة caddy لا تعمل على هذا السيرفر"
+  local exec
+  exec=$(systemctl show caddy -p ExecStart 2>/dev/null) || exec=
+  [[ $exec == *--resume* ]] && die "Caddy يعمل بإعداد محفوظ عبر API (--resume)، فلا يمكن تعديله آلياً؛ لم يتغير شيء"
+  if [ -z "$CADDYFILE" ]; then
+    if [[ $exec =~ --config[[:space:]=]+([^[:space:]\;]+) ]]; then CADDYFILE=${BASH_REMATCH[1]}
+    else CADDYFILE=/etc/caddy/Caddyfile; fi
+  fi
+  [ -f "$CADDYFILE" ] || die "لم أجد ملف إعداد Caddy: $CADDYFILE"
+  case $CADDYFILE in *.json) die "إعداد Caddy بصيغة JSON غير مدعوم آلياً؛ لم يتغير شيء" ;; esac
+}
+
+caddy_validate() { caddy validate --config "$CADDYFILE" --adapter caddyfile >"$STATE/validate.log" 2>&1; }
+caddy_adapt()    { caddy adapt --config "$CADDYFILE" --adapter caddyfile >"$1" 2>"$STATE/adapt.log"; }
+caddy_reload()   { systemctl reload caddy >"$STATE/reload.log" 2>&1; }
+
+# الإعداد الذي يعمل به Caddy الآن (من واجهة الإدارة المحلية)، لمقارنته بالملف على القرص
+caddy_running() {
+  local admin
+  admin=$(python3 -c 'import json,sys
+a = json.load(open(sys.argv[1])).get("admin") or {}
+print("off" if a.get("disabled") else (a.get("listen") or "localhost:2019"))' "$1" 2>/dev/null) || return 1
+  admin=${admin#tcp/}; admin=${admin%%|*}
+  case $admin in
+    off) return 1 ;;
+    unix/*) curl -fsS --noproxy '*' --max-time 5 --unix-socket "${admin#unix/}" http://localhost/config/ >"$2" 2>/dev/null ;;
+    :*) curl -fsS --noproxy '*' --max-time 5 "http://localhost$admin/config/" >"$2" 2>/dev/null ;;
+    *) curl -fsS --noproxy '*' --max-time 5 "http://$admin/config/" >"$2" 2>/dev/null ;;
+  esac
+}
+
+# مواقع (غير الدليل) يختلف إعدادها على القرص عمّا يعمل به Caddy؛ فارغ إن تطابقا أو تعذّر الفحص
+pending_edits() {
+  caddy_running "$STATE/adapt-before.json" "$STATE/running.json" || { echo "?"; return 0; }
+  local r
+  r=$(caddy_patch compare "$STATE/adapt-before.json" "$HOST" "$STATE/running.json" "$STATE")
+  [ "$(json_get "$r" status)" = same ] || json_get "$r" hosts
+}
+
+# يحلل ملفات Caddy ويستبدل كتلة النطاق (أو يعيدها)؛ لا يكتب شيئاً في وضع analyze
+caddy_patch() {
+  python3 - "$@" "$MARKER" <<'PY'
+import glob, json, os, re, sys
+
+mode, caddyfile, host, site_conf, state, MARK = sys.argv[1:7]
+host = host.lower()
+IMPORT_LINE = 'import ' + site_conf
+
+TARGETS = {host, 'www.' + host}
+
+def fail(msg):
+    print(json.dumps({'status': 'error', 'error': msg}, ensure_ascii=False))
+    sys.exit(0)
+
+def read_text(f):
+    """النص دون علامة BOM (يتجاهلها Caddy)، مع تذكّر وجودها لإعادتها عند الكتابة"""
+    t = open(f, encoding='utf-8', newline='').read()
+    return (t[1:], True) if t.startswith('﻿') else (t, False)
+
+def scan(text):
+    """أحداث الأقواس خارج النصوص والتعليقات وheredoc: [(رقم السطر، القوس)]"""
+    ev, i, n, line, start = [], 0, len(text), 0, True
+    while i < n:
+        c = text[i]
+        if c == '\n':
+            line += 1; start = True; i += 1; continue
+        if c in ' \t\r':
+            start = True; i += 1; continue
+        if c == '#' and start:
+            j = text.find('\n', i); i = n if j < 0 else j; continue
+        # مثل Caddy: علامة الاقتباس تبدأ نصاً في أول الكلمة فقط
+        if c == '"' and start:
+            i += 1
+            while i < n and text[i] != '"':
+                if text[i] == '\\':
+                    i += 1
+                    if i < n and text[i] == '\n': line += 1
+                elif text[i] == '\n': line += 1
+                i += 1
+            if i >= n: raise ValueError('quoted string without end')
+            i += 1; start = False; continue
+        if c == '`' and start:
+            j = text.find('`', i + 1)
+            if j < 0: raise ValueError('backtick string without end')
+            line += text.count('\n', i, j); i = j + 1; start = False; continue
+        if c == '<' and start and text.startswith('<<', i):
+            m = re.match(r'<<([A-Za-z0-9_-]+)[ \t]*\r?\n', text[i:])
+            if m:
+                marker, j = m.group(1), i + m.end()
+                line += 1
+                # سطر الإغلاق يبدأ بالعلامة وقد تليه وسائط أخرى (مثل: HTML 200)
+                end = re.compile(r'[ \t]*' + re.escape(marker) + r'(?=\s|$)')
+                while True:
+                    k = text.find('\n', j)
+                    seg = text[j:n if k < 0 else k]
+                    e = end.match(seg)
+                    if e:
+                        i = j + e.end(); break
+                    if k < 0: raise ValueError('heredoc without end')
+                    j = k + 1; line += 1
+                start = False; continue
+        if c in '{}':
+            ev.append((line, c))
+        start = False; i += 1
+    return ev
+
+def code_part(s):
+    """السطر دون تعليقه"""
+    out, q = [], False
+    for k, ch in enumerate(s):
+        if ch == '"' and (k == 0 or s[k - 1] != '\\'): q = not q
+        if ch == '#' and not q and (k == 0 or s[k - 1] in ' \t'): break
+        out.append(ch)
+    return ''.join(out).rstrip()
+
+def prev_code(codes, i):
+    """أقرب سطر فيه كود قبل السطر i (تُتخطّى الأسطر الفارغة والتعليقات)"""
+    j = i - 1
+    while j >= 0 and codes[j] == '':
+        j -= 1
+    return j if j >= 0 else None
+
+def blocks(text):
+    lines = text.split('\n')
+    codes = [code_part(l).strip() for l in lines]
+    res, depth, cur = [], 0, None
+    for ln, ch in scan(text):
+        if ch == '{':
+            if depth == 0: cur = ln
+            depth += 1
+        else:
+            depth -= 1
+            if depth < 0: raise ValueError('extra } at line %d' % (ln + 1))
+            if depth == 0:
+                if not codes[cur].endswith('{'): continue
+                start, head = cur, codes[cur][:-1].strip()
+                if head == '':
+                    # «{» وحده في سطر: العنوان في السطر السابق (إلا كتلة الإعدادات العامة)
+                    k = prev_code(codes, cur)
+                    if k is not None and not codes[k].endswith(('{', '}')):
+                        start, head = k, codes[k]
+                # قائمة عناوين ممتدة على عدة أسطر تنتهي بفاصلة
+                k = prev_code(codes, start)
+                while head and k is not None and codes[k].endswith(','):
+                    start, head = k, codes[k] + ' ' + head
+                    k = prev_code(codes, start)
+                res.append({'start': start, 'end': ln, 'head': head})
+    if depth != 0: raise ValueError('unbalanced braces')
+    return res, lines
+
+def top_imports(text, lines, base_dir):
+    inside = set()
+    for b in blocks(text)[0]:
+        inside.update(range(b['start'], b['end'] + 1))
+    out = []
+    for k, l in enumerate(lines):
+        if k in inside: continue
+        m = re.match(r'\s*import\s+(?:"([^"]+)"|`([^`]+)`|(\S+))', code_part(l))
+        if m:
+            p = m.group(1) or m.group(2) or m.group(3)
+            if '/' in p or '*' in p or '.' in p:
+                out.append(os.path.join(base_dir, p) if not os.path.isabs(p) else p)
+    return out
+
+def norm(addr):
+    a = addr.strip().lower()
+    scheme = ''
+    m = re.match(r'^(https?)://', a)
+    if m: scheme = m.group(1); a = a[m.end():]
+    a = a.split('/')[0]
+    a = re.sub(r':\d+$', '', a)
+    return scheme, a
+
+def files_to_scan():
+    seen, order, todo = set(), [], [(caddyfile, 0)]
+    while todo:
+        f, d = todo.pop(0)
+        f = os.path.realpath(f)
+        if f in seen or d > 3 or not os.path.isfile(f): continue
+        seen.add(f); order.append(f)
+        text = read_text(f)[0]
+        b, lines = blocks(text)
+        for pat in top_imports(text, lines, os.path.dirname(f)):
+            for g in sorted(glob.glob(pat)):
+                todo.append((g, d + 1))
+    return order
+
+def analyze():
+    found, already = [], []
+    for f in files_to_scan():
+        text = read_text(f)[0]
+        try:
+            bl, lines = blocks(text)
+        except ValueError as e:
+            fail('تعذّر فهم %s: %s' % (f, e))
+        if any(code_part(l).strip() == IMPORT_LINE for l in lines):
+            already.append(f)
+        for b in bl:
+            if not b['head'] or b['head'].startswith('('): continue
+            if '{' in b['head'] or '}' in b['head']:
+                # عنوان فيه متغيّر مثل {$N8N_HOST}: لا يخصّنا إلا إن ذُكر نطاقنا فيه
+                if host in b['head'].lower():
+                    fail('سطر عنوان غير مألوف في %s سطر %d' % (f, b['start'] + 1))
+                continue
+            addrs = [a for a in re.split(r'[,\s]+', b['head']) if a]
+            parsed = [norm(a) for a in addrs]
+            if not any(h == host and s != 'http' for s, h in parsed): continue
+            others = [a for (s, h), a in zip(parsed, addrs) if h not in (host, 'www.' + host)]
+            if others:
+                fail('كتلة %s في %s مشتركة مع عناوين أخرى (%s)؛ عدّلها يدوياً' % (host, f, ', '.join(others)))
+            tail = code_part(lines[b['end']]).strip()
+            if tail != '}':
+                fail('نهاية كتلة %s في %s سطر %d غير مألوفة' % (host, f, b['end'] + 1))
+            found.append({'file': f, 'start': b['start'], 'end': b['end'], 'addresses': ', '.join(addrs)})
+    if already:
+        return {'status': 'already', 'file': already[0], 'others': found}
+    if not found:
+        fail('لم أجد كتلة %s في إعداد Caddy (%s)' % (host, caddyfile))
+    if len(found) > 1:
+        fail('وجدت أكثر من كتلة لـ %s: %s' % (host, ', '.join('%s:%d' % (x['file'], x['start'] + 1) for x in found)))
+    return dict(found[0], status='patch')
+
+def write_like(path, text, bom=False):
+    st = os.stat(path)
+    tmp = path + '.dalil-hama-site.tmp'
+    with open(tmp, 'w', encoding='utf-8', newline='') as fh:
+        fh.write(('﻿' if bom else '') + text)
+    os.chmod(tmp, st.st_mode & 0o7777)
+    try: os.chown(tmp, st.st_uid, st.st_gid)
+    except PermissionError: pass
+    os.replace(tmp, path)
+
+def main():
+    if mode == 'analyze':
+        print(json.dumps(analyze(), ensure_ascii=False))
+    elif mode == 'apply':
+        r = analyze()
+        if r['status'] != 'patch':
+            print(json.dumps(r, ensure_ascii=False)); return
+        text, bom = read_text(r['file'])
+        lines = text.split('\n')
+        old = '\n'.join(lines[r['start']:r['end'] + 1]) + '\n'
+        indent = re.match(r'[ \t]*', lines[r['start']]).group(0)
+        eol = '\r' if lines[r['start']].endswith('\r') else ''
+        new = lines[:r['start']] + [indent + MARK + eol, indent + IMPORT_LINE + eol] + lines[r['end'] + 1:]
+        with open(os.path.join(state, 'old-block.caddy'), 'w', encoding='utf-8', newline='') as fh:
+            fh.write(old)
+        with open(os.path.join(state, 'patched-file'), 'w', encoding='utf-8', newline='') as fh:
+            fh.write(r['file'] + '\n')
+        write_like(r['file'], '\n'.join(new), bom)
+        print(json.dumps(dict(r, status='patched'), ensure_ascii=False))
+    elif mode == 'unpatch':
+        try:
+            f = open(os.path.join(state, 'patched-file'), encoding='utf-8', newline='').read().strip()
+            old = open(os.path.join(state, 'old-block.caddy'), encoding='utf-8', newline='').read()
+        except OSError:
+            fail('لا توجد نسخة محفوظة من كتلة الموقع القديم')
+        text, bom = read_text(f)
+        lines = text.split('\n')
+        idx = [k for k, l in enumerate(lines) if code_part(l).strip() == IMPORT_LINE]
+        if not idx and old.rstrip('\n') in text:
+            # أُعيدت الكتلة القديمة من قبل (رجوع سابق أو انقطع قبل إعادة التحميل)
+            print(json.dumps({'status': 'unpatched', 'file': f, 'already': True}, ensure_ascii=False))
+            return
+        if len(idx) != 1:
+            fail('لم أجد سطر الموقع الجديد في %s' % f)
+        k = idx[0]
+        a = k - 1 if k > 0 and lines[k - 1].strip() == MARK else k
+        new = lines[:a] + old.rstrip('\n').split('\n') + lines[k + 1:]
+        write_like(f, '\n'.join(new), bom)
+        print(json.dumps({'status': 'unpatched', 'file': f}, ensure_ascii=False))
+    elif mode == 'compare':
+        # حارس أخير: الإعداد كما يفهمه Caddy نفسه قبل التعديل وبعده (caddy adapt)
+        # يجب أن يبقى متطابقاً لكل المواقع عدا نطاقنا
+        before = routes_of(json.load(open(caddyfile, encoding='utf-8')))
+        after = routes_of(json.load(open(site_conf, encoding='utf-8')))
+        if before != after:
+            hosts = ', '.join(sorted({h for r in set(before) ^ set(after) for h in json.loads(r)[1]}) or ['(بلا نطاق)'])
+            print(json.dumps({'status': 'error', 'hosts': hosts,
+                              'error': 'التعديل كان سيغيّر مواقع أخرى في Caddy: %s' % hosts}, ensure_ascii=False))
+            return
+        print(json.dumps({'status': 'same'}))
+
+def routes_of(cfg):
+    """مسارات كل الخوادم عدا التي تخص نطاقنا وحده، بصيغة قابلة للمقارنة"""
+    out = []
+    servers = (((cfg or {}).get('apps') or {}).get('http') or {}).get('servers') or {}
+    for srv in servers.values():
+        listen = sorted(srv.get('listen') or [])
+        groups = (('routes', srv.get('routes') or []), ('errors', (srv.get('errors') or {}).get('routes') or []))
+        for kind, rs in groups:
+            for r in rs:
+                hosts = set()
+                for m in r.get('match') or []:
+                    hosts.update(h.lower() for h in (m.get('host') or []))
+                if hosts and hosts <= TARGETS: continue
+                out.append(json.dumps([listen, sorted(hosts), kind, r], sort_keys=True, ensure_ascii=False))
+    return sorted(out)
+
+try:
+    main()
+except (ValueError, OSError, UnicodeDecodeError) as e:
+    fail('تعذّر قراءة إعداد Caddy: %s' % e)
+PY
+}
+
+json_get() { python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get(sys.argv[2],""))' "$1" "$2"; }
+
+# مسارات قاعدة البيانات على السيرفر (بعد النقل فقط): البيانات والدخول على النطاق نفسه،
+# وconfig.js بديل يوجّه الواجهة إليها بدل Supabase
+# (ترويسة CF-Connecting-IP يضعها الزائر نفسه هنا، لا Cloudflare، فتُحذف كي لا يتجاوز حدود الطلبات بها)
+# ROUTES=local|supabase يحدد الوجهة صراحةً (caddy_switch)؛ دونه تُتبع علامة backend-local
+api_routes() {
+  case ${ROUTES:-} in
+    local) ;;
+    supabase) return 0 ;;
+    *) [ -f "$BACKEND_FLAG" ] || return 0 ;;
+  esac
+  cat <<EOF
+
+	handle_path /rest/v1/* {
+		request_body {
+			max_size 10MB
+		}
+		reverse_proxy 127.0.0.1:$API_PORT {
+			header_up -Cf-Connecting-Ip
+		}
+	}
+	handle_path /auth/v1/* {
+		request_body {
+			max_size 1MB
+		}
+		reverse_proxy 127.0.0.1:$AUTH_PORT {
+			header_up -Cf-Connecting-Ip
+		}
+	}
+	handle /assets/js/config.js {
+		root * $OVERRIDE
+		file_server
+	}
+EOF
+}
+
+write_site_conf() {
+  local addresses=$1 tmp=$SITE_CONF.new
+  mkdir -p "$ETC"; chmod 755 "$ETC"
+  cat > "$tmp" <<EOF
+# دليل حماة — الموقع الجديد (ملفات ثابتة من $BASE/current).
+# يكتب هذا الملفَّ الأمرُ dalil-hama-site عند كل تثبيت؛ أي تعديل يدوي هنا يُستبدل.
+$addresses {
+	root * $BASE/current
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), geolocation=(self), microphone=(self)"
+		Cross-Origin-Opener-Policy "same-origin"
+		Content-Security-Policy "default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; img-src 'self' data: blob: https://tile.openstreetmap.org https://cdnjs.cloudflare.com; font-src 'self'; connect-src 'self' https://jhgwzynxkioqfyoldoyx.supabase.co; manifest-src 'self'; worker-src 'self'; frame-src 'none'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'; upgrade-insecure-requests"
+		-Server
+	}
+
+	@revalidate path / /index.html /admin/ /admin/index.html /privacy/ /privacy/index.html /sw.js /manifest.webmanifest /release.txt /robots.txt /sitemap.xml *.js *.css
+	header @revalidate Cache-Control "no-cache"
+	@fonts path /assets/fonts/*
+	header @fonts Cache-Control "public, max-age=31536000, immutable"
+	@images path /assets/img/* /favicon.svg
+	header @images Cache-Control "public, max-age=86400"
+	header /manifest.webmanifest Content-Type "application/manifest+json"
+
+	redir /admin /admin/ 308
+	redir /privacy /privacy/ 301
+	respond /health "ok" 200
+$(api_routes)
+	file_server
+
+	handle_errors {
+		@missing_page {
+			expression {err.status_code} == 404
+			path_regexp ^/[^.]*$
+		}
+		redir @missing_page / 302
+		respond "{err.status_code} {err.status_text}"
+	}
+}
+EOF
+  chmod 644 "$tmp"
+  mv -f "$tmp" "$SITE_CONF"
+}
+
+# بلا RestrictSUIDSGID: يحجب openat2 كلياً، وtar 1.35 (Ubuntu 24.04) يستخدمه لفتح المجلدات أثناء الفك
+install_units() {
+  cat > "$UNIT_DIR/$UNIT.service" <<EOF
+[Unit]
+Description=Dalil Hama: fetch the latest site release
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=$SITE_USER
+Group=$SITE_USER
+ExecStart=$SELF_DST update --quiet
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ReadWritePaths=$BASE
+EOF
+  cat > "$UNIT_DIR/$UNIT.timer" <<EOF
+[Unit]
+Description=Dalil Hama: check for a new site release every 10 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=10min
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target
+EOF
+  chmod 644 "$UNIT_DIR/$UNIT.service" "$UNIT_DIR/$UNIT.timer"
+}
+
+# عناوين كتلة الموقع كما كُتبت في آخر تثبيت
+current_addresses() {
+  local a
+  a=$(awk '/^[^#[:space:]].*\{[[:space:]]*$/ { sub(/[[:space:]]*\{[[:space:]]*$/, ""); print; exit }' "$SITE_CONF" 2>/dev/null || true)
+  printf '%s\n' "${a:-$HOST}"
+}
+
+ensure_user() {
+  id "$SITE_USER" >/dev/null 2>&1 && return 0
+  useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$SITE_USER" ||
+    die "تعذّر إنشاء المستخدم $SITE_USER"
+}
+
+# ─────────── قاعدة البيانات على السيرفر ───────────
+
+pg() { runuser -u postgres -- psql -X -q -v ON_ERROR_STOP=1 "$@"; }
+
+# طلب HTTPS إلى الموقع عبر Caddy على السيرفر نفسه (دون وكيل)
+local_https() {
+  local path=$1; shift
+  curl -fsS --noproxy '*' --connect-timeout 3 --max-time 30 ${VERIFY_OPTS[@]+"${VERIFY_OPTS[@]}"} \
+    --resolve "$HOST:$PORT:127.0.0.1" "$@" "https://$HOST:$PORT$path"
+}
+
+port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+
+# ما يعرضه Caddy فعلاً الآن: config.js الموجَّه إلى قاعدة السيرفر أم إعداد Supabase
+site_on_server() {
+  grep -q "^export const SUPABASE_URL = '';" <<< "$(local_https /assets/js/config.js -H 'Cache-Control: no-cache' 2>/dev/null || true)"
+}
+
+# تنزيل ملف رسمي والتحقق من بصمته قبل أي استخدام
+fetch_verified() {
+  if [ -n "${DH_DOWNLOAD_DIR:-}" ]; then cp -- "$DH_DOWNLOAD_DIR/${1##*/}" "$3"
+  else curl -fsSL --retry 3 --retry-delay 3 --connect-timeout 20 --max-time 600 -o "$3" "$1" || die "تعذّر تنزيل ${1##*/}"; fi
+  [ "$(sha256sum "$3" | cut -d' ' -f1)" = "$2" ] || die "بصمة ${1##*/} لا تطابق النسخة الرسمية؛ لم يتغير شيء"
+}
+
+install_backend_binaries() {
+  local gh=https://github.com pg_url pg_sha au_url au_sha
+  case $(uname -m) in
+    x86_64|amd64)
+      pg_url=$gh/PostgREST/postgrest/releases/download/$PGRST_VERSION/postgrest-$PGRST_VERSION-linux-static-x86-64.tar.xz
+      au_url=$gh/supabase/auth/releases/download/$AUTH_VERSION/auth-$AUTH_VERSION-x86.tar.gz
+      pg_sha=$PGRST_SHA_X86; au_sha=$AUTH_SHA_X86 ;;
+    aarch64|arm64)
+      pg_url=$gh/PostgREST/postgrest/releases/download/$PGRST_VERSION/postgrest-$PGRST_VERSION-ubuntu-aarch64.tar.xz
+      au_url=$gh/supabase/auth/releases/download/$AUTH_VERSION/auth-$AUTH_VERSION-arm64.tar.gz
+      pg_sha=$PGRST_SHA_ARM; au_sha=$AUTH_SHA_ARM ;;
+    *) die "معالج السيرفر ($(uname -m)) غير مدعوم" ;;
+  esac
+  mkdir -p "$OPT"; chmod 755 "$OPT"
+  # بقايا تنزيل انقطع؛ القفل بأيدينا فلا تنزيل آخر جارٍ
+  rm -rf -- "$OPT"/.tmp.*
+  if [ ! -x "$OPT/postgrest-$PGRST_VERSION/postgrest" ]; then
+    TMP=$(mktemp -d "$OPT/.tmp.XXXXXX")
+    fetch_verified "$pg_url" "$pg_sha" "$TMP/p.tar.xz"
+    mkdir "$TMP/p"; tar -xJf "$TMP/p.tar.xz" -C "$TMP/p" --no-same-owner postgrest
+    chmod 755 "$TMP/p" "$TMP/p/postgrest"
+    mv -T "$TMP/p" "$OPT/postgrest-$PGRST_VERSION"; rm -rf -- "$TMP"; TMP=
+  fi
+  if [ ! -x "$OPT/auth-$AUTH_VERSION/auth" ]; then
+    TMP=$(mktemp -d "$OPT/.tmp.XXXXXX")
+    fetch_verified "$au_url" "$au_sha" "$TMP/a.tar.gz"
+    mkdir "$TMP/a"; tar -xzf "$TMP/a.tar.gz" -C "$TMP/a" --no-same-owner --no-same-permissions auth migrations
+    find "$TMP/a" -type d -exec chmod 755 {} +; find "$TMP/a" -type f -exec chmod 644 {} +; chmod 755 "$TMP/a/auth"
+    mv -T "$TMP/a" "$OPT/auth-$AUTH_VERSION"; rm -rf -- "$TMP"; TMP=
+  fi
+}
+
+ensure_api_user() {
+  id "$API_USER" >/dev/null 2>&1 && return 0
+  useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$API_USER" ||
+    die "تعذّر إنشاء المستخدم $API_USER"
+}
+
+# أسرار الخدمات تُولَّد على السيرفر مرة واحدة ولا تغادره
+load_secrets() {
+  local f=$ETC/backend.env
+  mkdir -p "$ETC"; chmod 755 "$ETC"
+  if [ ! -s "$f" ]; then
+    python3 -c 'import secrets
+print("JWT_SECRET=" + secrets.token_hex(32)); print("PW_API=" + secrets.token_hex(24)); print("PW_AUTH=" + secrets.token_hex(24))' > "$f.new"
+    chmod 600 "$f.new"; mv -f -- "$f.new" "$f"
+  fi
+  chmod 600 "$f"; chown root:root "$f"
+  JWT_SECRET=$(sed -n 's/^JWT_SECRET=\([0-9a-f]\{64\}\)$/\1/p' "$f")
+  PW_API=$(sed -n 's/^PW_API=\([0-9a-f]\{48\}\)$/\1/p' "$f")
+  PW_AUTH=$(sed -n 's/^PW_AUTH=\([0-9a-f]\{48\}\)$/\1/p' "$f")
+  [ -n "$JWT_SECRET" ] && [ -n "$PW_API" ] && [ -n "$PW_AUTH" ] || die "ملف الأسرار $f تالف"
+}
+
+pg_checks() {
+  local v
+  v=$(pg -Atc "show server_version_num") || die "تعذّر الاتصال بـ PostgreSQL المحلي"
+  [ "$v" -ge 130000 ] || die "PostgreSQL على السيرفر قديم ($v)؛ المطلوب 13 أو أحدث"
+  PG_PORT=$(pg -Atc "show port")
+}
+
+# قاعدة موجودة بغير UTF8 (عنقود مهيّأ بلغة C) لا تُكتب فيها نصوص عربية
+db_utf8_or_die() {
+  local enc
+  enc=$(pg -Atc "select pg_encoding_to_char(encoding) from pg_database where datname = '$DB'")
+  [ -z "$enc" ] || [ "$enc" = UTF8 ] ||
+    die "قاعدة $DB على السيرفر بترميز $enc لا UTF8؛ لن أكتب فيها نصوصاً عربية. لنقل جديد في قاعدة UTF8 (مع نسخة احتياطية من الحالية): sudo dalil-hama-site db-rollback ثم sudo dalil-hama-site install-db --replace"
+}
+
+db_exists()   { [ "$(pg -Atc "select 1 from pg_database where datname = '$DB'")" = 1 ]; }
+db_has_data() {
+  db_exists || return 1
+  [ "$(pg -d "$DB" -Atc "select to_regclass('public.listings') is not null")" = t ] || return 1
+  [ "$(pg -d "$DB" -Atc "select exists (select 1 from public.listings)")" = t ]
+}
+
+# الأدوار كما في Supabase، وقاعدة يملكها dalil_owner (ليس المستخدم الجذري لـ PostgreSQL)
+# الأدوار وكلمات مرورها؛ تلزم قبل أي استرجاع أيضاً (النسخة الاحتياطية لا تحمل الأدوار)
+db_roles() {
+  pg -v pw_api="$PW_API" -v pw_auth="$PW_AUTH" -f - >/dev/null <<'SQL'
+set client_min_messages = warning;
+do $$ begin
+  if not exists (select from pg_roles where rolname = 'anon') then create role anon nologin noinherit; end if;
+  if not exists (select from pg_roles where rolname = 'authenticated') then create role authenticated nologin noinherit; end if;
+  if not exists (select from pg_roles where rolname = 'service_role') then create role service_role nologin noinherit bypassrls; end if;
+  if not exists (select from pg_roles where rolname = 'authenticator') then create role authenticator login noinherit; end if;
+  if not exists (select from pg_roles where rolname = 'supabase_auth_admin') then create role supabase_auth_admin login noinherit; end if;
+  if not exists (select from pg_roles where rolname = 'dalil_owner') then create role dalil_owner nologin noinherit bypassrls; end if;
+end $$;
+alter role authenticator password :'pw_api';
+alter role supabase_auth_admin password :'pw_auth';
+alter role authenticator set statement_timeout = '8s';
+alter role anon set statement_timeout = '3s';
+alter role authenticated set statement_timeout = '8s';
+grant anon, authenticated, service_role to authenticator;
+SQL
+}
+
+db_bootstrap() {
+  db_roles
+  pg -v db="$DB" -f - >/dev/null <<'SQL'
+set client_min_messages = warning;
+-- UTF8 صراحةً: عناقيد PostgreSQL المهيّأة بلغة C تكون SQL_ASCII، فتُعدّ الحروف العربية بالبايت
+select format('create database %I owner dalil_owner encoding ''UTF8'' lc_collate ''C.UTF-8'' lc_ctype ''C.UTF-8'' template template0', :'db')
+ where not exists (select from pg_database where datname = :'db') \gexec
+\connect :db
+set client_min_messages = warning;
+revoke all on database :"db" from public;
+grant connect, temporary on database :"db" to authenticator, supabase_auth_admin;
+create schema if not exists auth authorization supabase_auth_admin;
+create schema if not exists extensions;
+create extension if not exists pgcrypto with schema extensions;
+create schema if not exists dh_meta authorization dalil_owner;
+grant usage on schema extensions to anon, authenticated, service_role, supabase_auth_admin, dalil_owner;
+grant usage on schema auth to anon, authenticated, service_role, dalil_owner;
+grant usage on schema public to anon, authenticated, service_role;
+create table if not exists dh_meta.migrations (name text primary key, applied_at timestamptz not null default now());
+alter table dh_meta.migrations owner to dalil_owner;
+SQL
+  local who pw hba
+  for who in authenticator supabase_auth_admin; do
+    if [ "$who" = authenticator ]; then pw=$PW_API; else pw=$PW_AUTH; fi
+    if ! PGPASSWORD=$pw psql -X -q -h 127.0.0.1 -p "$PG_PORT" -U "$who" -d "$DB" -Atc 'select 1' >/dev/null 2>&1; then
+      hba=$(pg -Atc 'show hba_file' 2>/dev/null) || hba=pg_hba.conf
+      # أول سطر يطابق في pg_hba هو المعتمد، فلا يكفي إلحاق السطر في آخر الملف
+      die "PostgreSQL يرفض دخول $who بكلمة مرور من 127.0.0.1. أضف هذا السطر في $hba فوق أسطر host الأخرى:
+  $HBA_LINE
+ثم: sudo systemctl reload postgresql وأعد الأمر"
+    fi
+  done
+}
+
+gotrue_env() {
+  cat <<EOF
+GOTRUE_API_HOST=127.0.0.1
+PORT=$AUTH_PORT
+API_EXTERNAL_URL=https://$HOST/auth/v1
+GOTRUE_SITE_URL=https://$HOST
+GOTRUE_URI_ALLOW_LIST=https://$HOST/**
+GOTRUE_DB_DRIVER=postgres
+GOTRUE_DB_DATABASE_URL=postgres://supabase_auth_admin:$PW_AUTH@127.0.0.1:$PG_PORT/$DB?search_path=auth&sslmode=disable
+GOTRUE_DB_MIGRATIONS_PATH=$OPT/auth-$AUTH_VERSION/migrations
+GOTRUE_DB_MAX_POOL_SIZE=5
+GOTRUE_JWT_SECRET=$JWT_SECRET
+GOTRUE_JWT_EXP=3600
+GOTRUE_JWT_AUD=authenticated
+GOTRUE_JWT_DEFAULT_GROUP_NAME=authenticated
+GOTRUE_JWT_ADMIN_ROLES=service_role
+GOTRUE_DISABLE_SIGNUP=true
+GOTRUE_EXTERNAL_EMAIL_ENABLED=true
+GOTRUE_EXTERNAL_PHONE_ENABLED=false
+GOTRUE_MAILER_AUTOCONFIRM=true
+GOTRUE_PASSWORD_MIN_LENGTH=10
+GOTRUE_SECURITY_REFRESH_TOKEN_ROTATION_ENABLED=true
+GOTRUE_SECURITY_REFRESH_TOKEN_REUSE_INTERVAL=10
+GOTRUE_RATE_LIMIT_HEADER=X-Forwarded-For
+GOTRUE_LOG_LEVEL=warn
+EOF
+}
+
+gotrue_migrate() {
+  # المتغيرات تُمرَّر إلى env كما هي، دون أن تمر على الصدفة (في رابط القاعدة & وفي القائمة **)
+  local -a vars=()
+  local line
+  while IFS= read -r line; do vars+=("$line"); done < <(gotrue_env)
+  (cd "$OPT/auth-$AUTH_VERSION" && env -i PATH=/usr/bin:/bin "${vars[@]}" ./auth migrate) \
+    >"$STATE/auth-migrate.log" 2>&1 || { tail -n 5 "$STATE/auth-migrate.log" >&2; die "فشل تجهيز جداول الدخول (GoTrue)"; }
+}
+
+# ما تحتاجه دوال الدليل من جداول الدخول: إنشاء المشرفين (admin_create_user) وربط جدول admins
+db_owner_grants() {
+  pg -d "$DB" -f - >/dev/null <<'SQL'
+grant select, insert, update, references on auth.users to dalil_owner;
+grant select, insert on auth.identities to dalil_owner;
+grant select, update on auth.refresh_tokens to dalil_owner;
+SQL
+}
+
+# مخطط الدليل من مجلد supabase/migrations في الإصدار المعروض نفسه؛ كل ملف يُطبَّق مرة واحدة
+app_migrations() {
+  local sha=$1 f name
+  rm -rf -- "$STATE"/.tmp.*
+  TMP=$(mktemp -d "$STATE/.tmp.XXXXXX")
+  if [ -n "${DH_SOURCE_TARBALL:-}" ]; then cp -- "$DH_SOURCE_TARBALL" "$TMP/src.tgz"
+  else curl -fsSL --retry 3 --retry-delay 3 --connect-timeout 20 --max-time 300 -o "$TMP/src.tgz" \
+         "https://codeload.github.com/$REPO/tar.gz/$sha" || die "تعذّر تنزيل مخطط قاعدة البيانات"; fi
+  mkdir "$TMP/m"
+  tar -xzf "$TMP/src.tgz" -C "$TMP/m" --no-same-owner --wildcards --strip-components=4 \
+      "*/dalil-hama/supabase/migrations/*.sql" 2>/dev/null || die "لم أجد ملفات مخطط قاعدة البيانات في الإصدار"
+  chmod -R a+rX "$TMP"
+  for f in "$TMP"/m/*.sql; do
+    name=${f##*/}
+    [[ $name =~ ^[0-9A-Za-z_.-]+\.sql$ ]] || die "اسم ملف مخطط غير مألوف: $name"
+    [ "$(pg -d "$DB" -Atc "select count(*) from dh_meta.migrations where name = '$name'")" = 0 ] || continue
+    { echo "set role dalil_owner;"; cat -- "$f"; echo "insert into dh_meta.migrations (name) values ('$name');"; } |
+      pg -d "$DB" -1 -f - >/dev/null 2>"$STATE/migrate.log" ||
+      { cat "$STATE/migrate.log" >&2; die "فشل تطبيق $name على قاعدة السيرفر"; }
+  done
+  rm -rf -- "$TMP"; TMP=
+}
+
+write_backend_configs() {
+  local old_umask
+  old_umask=$(umask); umask 027
+  cat > "$ETC/postgrest.conf.new" <<EOF
+db-uri = "postgres://authenticator:$PW_API@127.0.0.1:$PG_PORT/$DB"
+db-schemas = "public"
+db-anon-role = "anon"
+db-extra-search-path = "public, extensions"
+db-max-rows = 1000
+db-pool = 4
+jwt-secret = "$JWT_SECRET"
+jwt-aud = "authenticated"
+openapi-mode = "disabled"
+server-host = "127.0.0.1"
+server-port = $API_PORT
+log-level = "warn"
+EOF
+  gotrue_env > "$ETC/auth.env.new"
+  umask "$old_umask"
+  chown "root:$API_USER" "$ETC/postgrest.conf.new" "$ETC/auth.env.new"
+  chmod 640 "$ETC/postgrest.conf.new" "$ETC/auth.env.new"
+  mv -f -- "$ETC/postgrest.conf.new" "$ETC/postgrest.conf"
+  mv -f -- "$ETC/auth.env.new" "$ETC/auth.env"
+}
+
+backend_unit() {   # name description exec [extra]
+  cat > "$UNIT_DIR/$1.service" <<EOF
+[Unit]
+Description=$2
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+User=$API_USER
+Group=$API_USER
+${4:-}
+ExecStart=$3
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+MemoryMax=300M
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  chmod 644 "$UNIT_DIR/$1.service"
+}
+
+start_backend() {
+  local p u
+  for p in "$API_PORT:dalil-hama-api" "$AUTH_PORT:dalil-hama-auth"; do
+    u=${p#*:}
+    if port_in_use "${p%%:*}" && ! systemctl is-active --quiet "$u"; then
+      die "المنفذ ${p%%:*} مشغول ببرنامج آخر على السيرفر؛ لم يتغير شيء في الموقع"
+    fi
+  done
+  backend_unit dalil-hama-api "Dalil Hama: data API (PostgREST)" "$OPT/postgrest-$PGRST_VERSION/postgrest $ETC/postgrest.conf"
+  backend_unit dalil-hama-auth "Dalil Hama: admin sign-in (GoTrue)" "$OPT/auth-$AUTH_VERSION/auth serve" \
+    "EnvironmentFile=$ETC/auth.env
+WorkingDirectory=$OPT/auth-$AUTH_VERSION"
+  systemctl daemon-reload
+  systemctl enable dalil-hama-api dalil-hama-auth >/dev/null 2>&1 || true
+  systemctl restart dalil-hama-api dalil-hama-auth || die "تعذّر تشغيل خدمات قاعدة البيانات؛ راجع: journalctl -u dalil-hama-api -u dalil-hama-auth"
+  local until=$((SECONDS + 40))
+  while [ "$SECONDS" -lt "$until" ]; do
+    if curl -fsS --noproxy '*' --max-time 3 -X POST -H 'content-type: application/json' -d '{}' \
+         "http://127.0.0.1:$API_PORT/rpc/sync" >/dev/null 2>&1 &&
+       curl -fsS --noproxy '*' --max-time 3 "http://127.0.0.1:$AUTH_PORT/health" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  die "خدمات قاعدة البيانات لم تستجب؛ راجع: journalctl -u dalil-hama-api -u dalil-hama-auth"
+}
+
+# نسخة البيانات من Supabase عبر دالة التصدير المؤقتة المحمية بمفتاح النقل
+fetch_export() {
+  local out=$STATE/export.json
+  rm -f -- "$out"
+  EXPORT_LEFT=1
+  if [ -n "${DH_EXPORT_FILE:-}" ]; then cp -- "$DH_EXPORT_FILE" "$out"
+  else
+    printf '{"p_token":"%s"}' "$1" | curl -fsS --compressed --connect-timeout 20 --max-time 180 -X POST \
+      -H "apikey: $SUPABASE_KEY" -H 'content-type: application/json' --data-binary @- \
+      -o "$out" "$SUPABASE_URL/rest/v1/rpc/dh_server_export" || die "تعذّر الاتصال بـ Supabase لنقل البيانات"
+  fi
+  chmod 600 "$out"
+  EXPORT_APPROVED=$(python3 - "$out" "$STATE/export.line" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding='utf-8'))
+if not isinstance(d, dict) or d.get('format') != 1 or not d.get('listings') or not d.get('admins'):
+    sys.exit(1)
+open(sys.argv[2], 'w', encoding='utf-8').write(json.dumps(d, ensure_ascii=False, separators=(',', ':')))
+print(sum(1 for l in d['listings'] if l.get('status') == 'approved'))
+PY
+) || die "مفتاح النقل غير صحيح أو انتهت صلاحيته؛ لم يتغير شيء في الموقع"
+  chmod 600 "$STATE/export.line"
+}
+
+import_export() {
+  {
+    cat <<'SQL'
+\set ON_ERROR_STOP on
+begin;
+set local session_replication_role = replica;
+create temp table imp (j jsonb) on commit drop;
+copy imp from stdin with (format csv, quote e'\x01', delimiter e'\x02');
+SQL
+    cat -- "$STATE/export.line"
+    printf '\n\\.\n'
+    cat <<'SQL'
+create function pg_temp.load(tbl regclass, data jsonb) returns integer language plpgsql as $$
+declare cols text; n integer;
+begin
+  if data is null or jsonb_array_length(data) = 0 then return 0; end if;
+  select string_agg(quote_ident(a.attname), ', ' order by a.attnum) into cols
+    from pg_attribute a
+   where a.attrelid = tbl and a.attnum > 0 and not a.attisdropped and a.attgenerated = ''
+     and (data -> 0) ? a.attname;
+  execute format('insert into %s (%s) select %s from jsonb_populate_recordset(null::%s, $1)', tbl, cols, cols, tbl) using data;
+  get diagnostics n = row_count;
+  return n;
+end $$;
+
+do $$
+declare d jsonb := (select j from imp); r record; got integer; want integer;
+begin
+  if exists (select 1 from public.listings) then raise exception 'server database already has data; refusing to overwrite'; end if;
+  delete from public.settings;
+  for r in select * from (values
+      (1, 'auth.users', 'users'), (2, 'auth.identities', 'identities'),
+      (3, 'public.categories', 'categories'), (4, 'public.areas', 'areas'),
+      (5, 'public.listings', 'listings'), (6, 'public.listing_stats', 'listing_stats'),
+      (7, 'public.reports', 'reports'), (8, 'public.settings', 'settings'),
+      (9, 'public.admins', 'admins'), (10, 'public.daily_stats', 'daily_stats'),
+      (11, 'public.search_terms', 'search_terms'), (12, 'public.audit_log', 'audit_log'),
+      (13, 'private.tombstones', 'tombstones'), (14, 'private.track_seen', 'track_seen')) v(o, tbl, key) order by o
+  loop
+    got := pg_temp.load(r.tbl::regclass, d -> r.key);
+    want := coalesce(jsonb_array_length(d -> r.key), 0);
+    if got <> want then raise exception '% rows: got % expected %', r.tbl, got, want; end if;
+  end loop;
+  perform setval(pg_get_serial_sequence('public.categories', 'id'), greatest((select max(id) from public.categories), (d #>> '{sequences,categories}')::bigint, 1));
+  perform setval(pg_get_serial_sequence('public.areas', 'id'), greatest((select max(id) from public.areas), (d #>> '{sequences,areas}')::bigint, 1));
+  perform setval(pg_get_serial_sequence('public.listings', 'id'), greatest((select max(id) from public.listings), (d #>> '{sequences,listings}')::bigint, 1000000));
+  perform setval(pg_get_serial_sequence('public.reports', 'id'), greatest((select max(id) from public.reports), (d #>> '{sequences,reports}')::bigint, 1));
+  perform setval(pg_get_serial_sequence('public.audit_log', 'id'), greatest((select max(id) from public.audit_log), (d #>> '{sequences,audit_log}')::bigint, 1));
+end $$;
+commit;
+SQL
+  } | pg -d "$DB" -f - >"$STATE/import.log" 2>&1 || { tail -n 5 "$STATE/import.log" >&2; die "فشل استيراد البيانات إلى قاعدة السيرفر؛ لم يتغير شيء"; }
+}
+
+shred_export() {
+  shred -u -- "$STATE/export.json" "$STATE/export.line" 2>/dev/null || true
+  rm -f -- "$STATE/export.json" "$STATE/export.line"
+}
+
+drop_db() { pg -c "set client_min_messages = warning" -c "drop database if exists \"$1\" with (force)" >/dev/null; }
+
+# القاعدة المنقولة تُبنى كاملة باسم مؤقت؛ القاعدة الحالية (إن وُجدت) لا تُمس حتى ينجح الاستيراد
+build_new_db() {   # sha
+  local DB=${DB}_new
+  drop_db "$DB"
+  db_bootstrap
+  gotrue_migrate
+  db_owner_grants
+  app_migrations "$1"
+  import_export
+}
+
+# تبديل الاسمين في معاملة واحدة: إما القاعدة الجديدة كاملة وإما القديمة كما هي
+swap_in_new_db() {
+  local new=${DB}_new old=${DB}_old
+  systemctl stop dalil-hama-api dalil-hama-auth >/dev/null 2>&1 || true
+  drop_db "$old"
+  if db_exists; then
+    pg -c "select pg_terminate_backend(pid) from pg_stat_activity where datname in ('$DB', '$new') and pid <> pg_backend_pid()" >/dev/null
+    pg -1 -c "alter database $DB rename to $old" -c "alter database $new rename to $DB" >/dev/null ||
+      die "تعذّر وضع البيانات المنقولة مكان قاعدة السيرفر؛ لم يتغير شيء"
+    drop_db "$old"
+  else
+    pg -c "alter database $new rename to $DB" >/dev/null || die "تعذّر وضع البيانات المنقولة في قاعدة $DB"
+  fi
+}
+
+# أحدث نسخة احتياطية وطريقة استرجاعها (لرسائل الأعطال)
+restore_hint() {
+  local last
+  last=$(ls -1t -- "$BACKUP_DIR/$DB-"*.dump 2>/dev/null | head -n 1) || last=
+  if [ -z "$last" ]; then printf 'لا توجد نسخة احتياطية في %s' "$BACKUP_DIR"; return 0; fi
+  printf 'لاسترجاع آخر نسخة احتياطية (%s):  sudo dalil-hama-site db-restore' "${last##*/}"
+}
+
+# config.js الإصدار الحالي، موجَّهاً إلى قاعدة السيرفر (يُعاد مع كل إصدار جديد)
+write_override() {
+  [ -f "$BACKEND_FLAG" ] || [ "${1:-}" = force ] || return 0
+  local src=$BASE/current/assets/js/config.js dir=$OVERRIDE/assets/js
+  [ -f "$src" ] || return 0
+  mkdir -p "$dir"
+  sed -E -e "s#^[[:space:]]*export[[:space:]]+const[[:space:]]+SUPABASE_URL[[:space:]]*=.*#export const SUPABASE_URL = '';#" \
+         -e "s#^[[:space:]]*export[[:space:]]+const[[:space:]]+SUPABASE_KEY[[:space:]]*=.*#export const SUPABASE_KEY = 'local';#" \
+         "$src" > "$dir/config.js.new"
+  # سطر واحد بالضبط يوجّه إلى السيرفر؛ وإلا يبقى الملف السابق كما هو (لا تكرار للتصدير يكسر الموقع)
+  if [ "$(grep -c "SUPABASE_URL" "$dir/config.js.new")" != 1 ] ||
+     ! grep -q "^export const SUPABASE_URL = '';$" "$dir/config.js.new"; then
+    rm -f -- "$dir/config.js.new"
+    warn "صيغة config.js في هذا الإصدار غير متوقعة؛ أبقيت ملف الإعداد السابق"
+    return 0
+  fi
+  chmod 644 "$dir/config.js.new"; chmod 755 "$OVERRIDE" "$OVERRIDE/assets" "$dir"
+  mv -f -- "$dir/config.js.new" "$dir/config.js"
+}
+
+backend_serving() {   # expected number of published listings (or empty: any non-zero)
+  local until=$((SECONDS + 30)) n
+  while [ "$SECONDS" -lt "$until" ]; do
+    if local_https /assets/js/config.js -H 'Cache-Control: no-cache' 2>/dev/null | grep -q "^export const SUPABASE_URL = '';" &&
+       local_https /auth/v1/health 2>/dev/null | grep -q GoTrue; then
+      n=$(local_https /rest/v1/rpc/sync -X POST -H 'content-type: application/json' -d '{}' 2>/dev/null |
+          python3 -c 'import json,sys; print(len(json.load(sys.stdin)["items"]))' 2>/dev/null) || n=
+      if [ -n "$n" ] && { { [ -z "${1:-}" ] && [ "$n" -gt 0 ]; } || [ "$n" = "${1:-}" ]; }; then return 0; fi
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+install_backup_units() {
+  cat > "$UNIT_DIR/dalil-hama-site-backup.service" <<EOF
+[Unit]
+Description=Dalil Hama: nightly database backup
+After=postgresql.service
+
+[Service]
+Type=oneshot
+ExecStart=$SELF_DST backup --quiet
+EOF
+  cat > "$UNIT_DIR/dalil-hama-site-backup.timer" <<EOF
+[Unit]
+Description=Dalil Hama: nightly database backup
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+  chmod 644 "$UNIT_DIR/dalil-hama-site-backup.service" "$UNIT_DIR/dalil-hama-site-backup.timer"
+  systemctl daemon-reload
+  systemctl enable --now dalil-hama-site-backup.timer >/dev/null 2>&1 || warn "تعذّر تفعيل النسخ الاحتياطي الليلي"
+}
+
+caddy_switch() {   # local|supabase: يعيد كتابة إعداد الموقع ويفعّله؛ يعيد 1 دون تغيير إن رفضه Caddy
+  local ROUTES=$1 addresses backup=$STATE/site.caddy.switch.bak pending
+  # إعادة التحميل تفعّل ملف Caddy كله: لا تُفعَّل معها تعديلات معلّقة على مواقع أخرى (n8n)
+  if caddy_adapt "$STATE/adapt-before.json"; then
+    pending=$(pending_edits)
+    if [ -n "$pending" ] && [ "$pending" != "?" ]; then
+      warn "ملف Caddy فيه تعديلات لم تُفعَّل بعد على: $pending. فعّلها (sudo systemctl reload caddy) أو ألغها أولاً"
+      return 1
+    fi
+  fi
+  addresses=$(current_addresses)
+  cp -p -- "$SITE_CONF" "$backup"
+  write_site_conf "$addresses"
+  if ! caddy_validate; then
+    tail -n 5 "$STATE/validate.log" >&2 || true
+    cp -p -- "$backup" "$SITE_CONF"
+    return 1
+  fi
+  if ! caddy_reload; then
+    tail -n 5 "$STATE/reload.log" >&2 || true
+    cp -p -- "$backup" "$SITE_CONF"; caddy_reload || true
+    return 1
+  fi
+}
+
+# ─────────── الأوامر ───────────
+
+cmd_install() {
+  need_root install
+  need_tools curl tar python3 flock find
+  load_conf
+  detect_caddy
+  mkdir -p "$STATE"; chmod 700 "$STATE"
+
+  local self sha ts analysis status file addresses backup missing cur
+  self=$(readlink -f "${BASH_SOURCE[0]}")
+  [ -f "$self" ] || die "نزّل الملف أولاً ثم شغّله: sudo bash /tmp/dalil-hama-site install"
+
+  say "١/٤ تنزيل الموقع الجديد من GitHub…"
+  ensure_user
+  take_lock
+  ensure_history
+  sha=$(remote_sha) || die "تعذّر معرفة آخر إصدار من GitHub ($REPO / $BRANCH)"
+  fetch_release "$sha"
+  missing=$(missing_migrations "$sha")
+  if [ -n "${missing// /}" ] && cur=$(current_sha) && [ -d "$BASE/releases/$cur" ]; then
+    # كما في التحديث التلقائي: واجهة تحتاج مخططاً لم يُطبَّق على قاعدة السيرفر تنتظر install-db
+    warn "الإصدار ${sha:0:7} يحتاج تحديث قاعدة البيانات (${missing% })، فأبقيت الموقع على ${cur:0:7}. بعد التثبيت شغّل: sudo dalil-hama-site install-db"
+    sha=$cur
+  fi
+  activate "$sha"
+  printf '%s\n' "$sha" > "$BASE/last-checked"
+  rm -f -- "$BASE/PINNED" "$BASE/.last-error"
+  prune
+  fix_owner
+  ok "الإصدار ${sha:0:7} جاهز في $BASE/current"
+
+  say "٢/٤ تجهيز Caddy…"
+  if [ "$self" != "$(readlink -f "$SELF_DST" 2>/dev/null || true)" ]; then
+    install -m 755 "$self" "$SELF_DST"
+  fi
+  analysis=$(caddy_patch analyze "$CADDYFILE" "$HOST" "$SITE_CONF" "$STATE")
+  status=$(json_get "$analysis" status)
+  [ "$status" = error ] && die "$(json_get "$analysis" error)؛ لم يتغير شيء في Caddy"
+  if [ "$status" = already ] && [ "$(served_sha || true)" != "$sha" ]; then
+    # تثبيت سابق انقطع قبل التحقق: نعيد كتلة الموقع القديم إلى الملف أولاً ثم نثبّت من البداية
+    analysis=$(caddy_patch unpatch "$CADDYFILE" "$HOST" "$SITE_CONF" "$STATE")
+    [ "$(json_get "$analysis" status)" = unpatched ] || die "$(json_get "$analysis" error)؛ لم يتغير شيء في Caddy"
+    analysis=$(caddy_patch analyze "$CADDYFILE" "$HOST" "$SITE_CONF" "$STATE")
+    status=$(json_get "$analysis" status)
+    [ "$status" = patch ] || die "$(json_get "$analysis" error)؛ لم يتغير شيء في Caddy"
+  fi
+  file=$(json_get "$analysis" file)
+  ts=$(date +%Y%m%d-%H%M%S)
+  backup="$STATE/$(basename "$file").$ts.bak"
+  cp -p -- "$file" "$backup"
+  [ -f "$SITE_CONF" ] && cp -p -- "$SITE_CONF" "$STATE/site.caddy.$ts.bak"
+
+  if [ "$status" = patch ]; then
+    addresses=$(json_get "$analysis" addresses)
+  else
+    addresses=$(current_addresses)
+  fi
+
+  restore_files() {
+    cp -p -- "$backup" "$file"
+    if [ -f "$STATE/site.caddy.$ts.bak" ]; then cp -p -- "$STATE/site.caddy.$ts.bak" "$SITE_CONF"; fi
+  }
+  restore() {
+    restore_files
+    caddy_reload || warn "تعذّرت إعادة تحميل Caddy بعد الاسترجاع؛ راجع: systemctl status caddy"
+  }
+
+  if [ "$status" = patch ]; then
+    caddy_adapt "$STATE/adapt-before.json" ||
+      { cat "$STATE/adapt.log" >&2; die "تعذّرت قراءة إعداد Caddy الحالي؛ لم يتغير شيء"; }
+    # إعادة التحميل تفعّل الملف كله؛ تعديلات معلّقة على مواقع أخرى (n8n مثلاً) ستعمل معه
+    local pending
+    pending=$(pending_edits)
+    if [ "$pending" = "?" ]; then
+      warn "تعذّرت قراءة الإعداد العامل من Caddy، فلم أتحقق من التعديلات المعلّقة"
+    elif [ -n "$pending" ]; then
+      die "ملف Caddy فيه تعديلات لم تُفعَّل بعد على: $pending. فعّلها (systemctl reload caddy) أو ألغها أولاً؛ لم يتغير شيء"
+    fi
+  fi
+
+  # انقطاع الجلسة أو Ctrl+C أثناء التعديل: نعيد الملفات كما كانت قبل الخروج
+  on_abort() { trap - INT TERM HUP; restore_files 2>/dev/null || true; caddy_reload || true; exit 130; }
+  trap on_abort INT TERM HUP
+  write_site_conf "$addresses"
+  if [ "$status" = patch ]; then
+    analysis=$(caddy_patch apply "$CADDYFILE" "$HOST" "$SITE_CONF" "$STATE")
+    if [ "$(json_get "$analysis" status)" != patched ]; then
+      restore_files
+      die "$(json_get "$analysis" error)؛ لم يتغير شيء في Caddy"
+    fi
+    # حارس: كل المواقع الأخرى (n8n وغيره) يجب أن تبقى كما هي حرفياً في نظر Caddy
+    if ! caddy_adapt "$STATE/adapt-after.json"; then
+      restore_files
+      cat "$STATE/adapt.log" >&2
+      die "رفض Caddy الإعداد الجديد فأعدت الملف كما كان؛ الموقع القديم يعمل كما هو"
+    fi
+    analysis=$(caddy_patch compare "$STATE/adapt-before.json" "$HOST" "$STATE/adapt-after.json" "$STATE")
+    if [ "$(json_get "$analysis" status)" != same ]; then
+      restore_files
+      die "$(json_get "$analysis" error)، فأعدت الملف كما كان ولم يتغير شيء"
+    fi
+  fi
+
+  say "٣/٤ فحص الإعداد وتفعيله…"
+  if ! caddy_validate; then
+    restore_files
+    cat "$STATE/validate.log" >&2
+    die "رفض Caddy الإعداد الجديد فأعدت الملف كما كان؛ الموقع القديم يعمل كما هو"
+  fi
+  if ! caddy_reload; then
+    cat "$STATE/reload.log" >&2
+    restore
+    die "تعذّر تفعيل الإعداد الجديد فأعدت كل شيء كما كان؛ الموقع القديم يعمل كما هو"
+  fi
+  if ! wait_served "$sha"; then
+    restore
+    die "Caddy لم يعرض الموقع الجديد خلال 30 ثانية فأعدت كل شيء كما كان؛ الموقع القديم يعمل كما هو"
+  fi
+  trap - INT TERM HUP
+  ok "النطاق https://$HOST يعرض الآن الموقع الجديد"
+
+  say "٤/٤ تفعيل التحديث التلقائي…"
+  install_units
+  systemctl daemon-reload
+  systemctl enable --now "$UNIT.timer" >/dev/null 2>&1 || warn "تعذّر تفعيل التحديث التلقائي؛ يمكنك التحديث يدوياً: sudo dalil-hama-site update"
+  date -u +%FT%TZ > "$STATE/installed-at"
+
+  say ""
+  ok "تم. الموقع الجديد يعمل على https://$HOST (الإصدار ${sha:0:7})"
+  say "  • يتحدّث تلقائياً كل 10 دقائق من GitHub."
+  say "  • الموقع القديم ما زال يعمل في الخلفية، ولم تُمسّ قاعدة بياناته، ولا يصل إليه الزوار."
+  say "  • للرجوع إلى الموقع القديم فوراً:  sudo dalil-hama-site rollback"
+}
+
+cmd_update() {
+  [ "${1:-}" = --quiet ] && QUIET=1
+  need_tools curl tar flock find python3 sha256sum
+  load_conf
+  take_lock
+  ERRLOG=$BASE/.last-error
+  ensure_history
+  if [ -f "$BASE/PINNED" ]; then
+    say "التحديث التلقائي موقوف على الإصدار $(cut -c1-7 "$BASE/PINNED"). لاستئنافه: sudo dalil-hama-site resume"
+    return 0
+  fi
+  local sha cur f
+  sha=$(remote_sha) || die "تعذّر معرفة آخر إصدار من GitHub ($REPO / $BRANCH)"
+  cur=$(current_sha) || cur=
+  # علامات رفض لرؤوس فرع سابقة لم تعد تلزم
+  for f in "$BASE"/bad-*; do
+    if [ -e "$f" ] && [ "$f" != "$BASE/bad-$sha" ]; then rm -f -- "$f"; fi
+  done
+  if [ -f "$BASE/bad-$sha" ]; then
+    say "آخر إصدار (${sha:0:7}) مرفوض: $(cat "$BASE/bad-$sha")؛ الموقع باقٍ على ${cur:0:7}"
+    return 0
+  fi
+  if [ "$sha" = "$cur" ] || [ "$sha" = "$(cat "$BASE/last-checked" 2>/dev/null || true)" ]; then
+    rm -f -- "$ERRLOG"
+    say "الموقع على آخر إصدار (${cur:0:7})"
+    return 0
+  fi
+  fetch_release "$sha"
+  local missing
+  missing=$(missing_migrations "$sha")
+  if [ -n "${missing// /}" ]; then
+    # الواجهة الجديدة تحتاج مخططاً لم يُطبَّق بعد؛ تفعيلها الآن يكسر الموقع، فتنتظر install-db
+    die "الإصدار ${sha:0:7} يحتاج تحديث قاعدة البيانات (${missing% }) فبقي الموقع على ${cur:0:7}. شغّل: sudo dalil-hama-site install-db"
+  fi
+  if [ -n "$cur" ] && [ -d "$BASE/releases/$cur" ] &&
+     [ "$(release_digest "$BASE/releases/$sha")" = "$(release_digest "$BASE/releases/$cur")" ]; then
+    # الإصدار لم يغيّر ملفات الموقع (تعديل في جزء آخر من المستودع): يبقى المعروض كما هو
+    rm -rf -- "${BASE:?}/releases/$sha"
+    rm -f -- "${BASE:?}/releases/$sha.migrations"
+    printf '%s\n' "$sha" > "$BASE/last-checked"
+    rm -f -- "$ERRLOG"
+    fix_owner
+    say "لا تغيير في ملفات الموقع في ${sha:0:7}؛ يبقى الإصدار ${cur:0:7}"
+    return 0
+  fi
+  activate "$sha"
+  printf '%s\n' "$sha" > "$BASE/last-checked"
+  prune
+  rm -f -- "$ERRLOG"
+  fix_owner
+  printf 'dalil-hama-site: %s -> %s\n' "${cur:0:7}" "${sha:0:7}"
+}
+
+cmd_previous() {
+  need_root previous
+  take_lock
+  ensure_history
+  local prev cur
+  cur=$(current_sha) || cur=
+  # الإصدار الذي سبق الحالي في السجل؛ تكرار الأمر يرجع خطوة أخرى إلى الوراء
+  prev=$(awk -v c="$cur" '$0 == c { print p; exit } { p = $0 }' "$BASE/history" 2>/dev/null) || prev=
+  if ! is_sha "$prev" || [ ! -d "$BASE/releases/$prev" ]; then
+    die "لا يوجد إصدار أقدم محفوظ من ${cur:0:7}"
+  fi
+  activate "$prev" 0
+  printf '%s\n' "$prev" > "$BASE/PINNED"
+  rm -f -- "$BASE/last-checked"
+  fix_owner
+  ok "رجع الموقع إلى الإصدار ${prev:0:7} (كان ${cur:0:7})، وأُوقف التحديث التلقائي."
+  say "  للرجوع خطوة أخرى كرّر الأمر. لاستئناف التحديث:  sudo dalil-hama-site resume"
+}
+
+cmd_resume() {
+  need_root resume
+  rm -f -- "$BASE/PINNED" "$BASE/last-checked"
+  cmd_update
+}
+
+cmd_rollback() {
+  need_root rollback
+  need_tools python3
+  detect_caddy
+  local r file ts backup
+  [ -f "$STATE/patched-file" ] || die "لا توجد نسخة محفوظة من إعداد الموقع القديم"
+  file=$(cat "$STATE/patched-file")
+  ts=$(date +%Y%m%d-%H%M%S)
+  backup="$STATE/$(basename "$file").$ts.before-rollback.bak"
+  cp -p -- "$file" "$backup"
+  local guard=0 pending
+  caddy_adapt "$STATE/adapt-before.json" && guard=1
+  if [ "$guard" = 1 ]; then
+    pending=$(pending_edits)
+    if [ -n "$pending" ] && [ "$pending" != "?" ]; then
+      warn "تنبيه: في ملف Caddy تعديلات لم تُفعَّل بعد على: $pending، وستُفعَّل مع الرجوع"
+    fi
+  fi
+  r=$(caddy_patch unpatch "$CADDYFILE" "$HOST" "$SITE_CONF" "$STATE")
+  [ "$(json_get "$r" status)" = unpatched ] || die "$(json_get "$r" error)"
+  if [ "$guard" = 1 ]; then
+    if caddy_adapt "$STATE/adapt-after.json"; then
+      r=$(caddy_patch compare "$STATE/adapt-before.json" "$HOST" "$STATE/adapt-after.json" "$STATE")
+    else
+      r='{"status":"error","error":"رفض Caddy إعداد الموقع القديم"}'
+    fi
+    if [ "$(json_get "$r" status)" != same ]; then
+      cp -p -- "$backup" "$file"
+      die "$(json_get "$r" error)؛ أبقيت الموقع الجديد كما هو"
+    fi
+  fi
+  if ! caddy_validate || ! caddy_reload; then
+    cp -p -- "$backup" "$file"
+    caddy_reload || true
+    cat "$STATE/validate.log" "$STATE/reload.log" >&2 2>/dev/null || true
+    die "تعذّر تفعيل إعداد الموقع القديم فأبقيت الموقع الجديد كما هو"
+  fi
+  systemctl disable --now "$UNIT.timer" >/dev/null 2>&1 || true
+  systemctl is-active --quiet dalil-hama ||
+    warn "خدمة الموقع القديم dalil-hama متوقفة؛ شغّلها: sudo systemctl start dalil-hama"
+  ok "عاد النطاق https://$HOST إلى الموقع القديم."
+  say "  لإعادة الموقع الجديد لاحقاً:  sudo dalil-hama-site install"
+}
+
+cmd_install_db() {
+  need_root install-db
+  local token='' replace=0 a self mode rel had_marker=0 resume=0 switched=0
+  for a in "$@"; do case $a in --replace) replace=1 ;; *) token=$a ;; esac; done
+  need_tools curl tar xz python3 flock psql pg_dump runuser sha256sum shred
+  load_conf
+  detect_caddy
+  [ -f "$STATE/patched-file" ] && [ -L "$BASE/current" ] || die "ثبّت الموقع أولاً: sudo dalil-hama-site install"
+  # بعد rollback إلى الموقع القديم لا يمر النطاق بإعداد الموقع الجديد، فلا معنى لتحويل قاعدته
+  [ "$(json_get "$(caddy_patch analyze "$CADDYFILE" "$HOST" "$SITE_CONF" "$STATE" 2>/dev/null || echo '{}')" status)" = already ] ||
+    die "النطاق لا يعرض الموقع الجديد الآن؛ شغّل أولاً: sudo dalil-hama-site install"
+  systemctl is-active --quiet postgresql || die "PostgreSQL لا يعمل على هذا السيرفر"
+  # live: الموقع يعمل على قاعدة السيرفر، فتحديث للخدمات والمخطط فقط
+  # reattach: عمل عليها ثم أُعيد إلى Supabase، فنعود إليها كما هي دون نقل جديد
+  # transfer: نقل جديد من Supabase بمفتاح النقل
+  if [ -f "$BACKEND_FLAG" ]; then
+    mode=live
+    if [ -f "$ETC/switch-pending" ] && ! site_on_server; then
+      # نقل سابق انقطع قبل أن يصل الزوار إلى قاعدة السيرفر: يُعاد بنسخة جديدة من Supabase (فيها ما أُضيف منذ ذلك الحين)
+      mode=transfer; replace=1; resume=1
+      say "النقل السابق انقطع قبل تحويل الموقع (والموقع ما زال على Supabase)؛ سأعيده بنسخة جديدة من Supabase."
+    fi
+  elif [ -n "$token" ] || [ -n "${DH_EXPORT_FILE:-}" ] || [ "$replace" = 1 ] || [ ! -f "$ETC/backend-was-live" ]; then mode=transfer
+  else mode=reattach; fi
+  if [ "$mode" = live ] && { [ -n "$token" ] || [ "$replace" = 1 ]; }; then
+    die "الموقع يعمل على قاعدة السيرفر الآن؛ لن أستبدلها. للنقل من جديد من Supabase: sudo dalil-hama-site db-rollback ثم sudo dalil-hama-site install-db --replace"
+  fi
+  if [ "$mode" = transfer ] && [ -z "$token" ] && [ -z "${DH_EXPORT_FILE:-}" ]; then
+    # يُطلب المفتاح هنا كي لا يظهر في قائمة العمليات وسجل sudo
+    if [ ! -t 0 ]; then
+      if [ "$replace" = 1 ]; then die "شغّل الأمر في الطرفية ليطلب مفتاح النقل: sudo dalil-hama-site install-db --replace"; fi
+      die "شغّل الأمر في الطرفية ليطلب مفتاح النقل: sudo dalil-hama-site install-db"
+    fi
+    read -r -s -p "الصق مفتاح النقل ثم اضغط Enter: " token; echo
+    token=${token//[$'\r\t ']/}
+    [ -n "$token" ] || die "لم يُلصق مفتاح النقل؛ لم يتغير شيء"
+  fi
+  [ -z "$token" ] || [[ $token =~ ^[0-9a-f]{48}$ ]] || die "مفتاح النقل غير صالح"
+  self=$(readlink -f "${BASH_SOURCE[0]}")
+  if [ -f "$self" ] && [ "$self" != "$(readlink -f "$SELF_DST" 2>/dev/null || true)" ]; then install -m 755 "$self" "$SELF_DST"; fi
+  mkdir -p "$STATE"; chmod 700 "$STATE"
+  take_lock
+  shred_export   # بقايا تشغيل سابق انقطع
+  if [ "$resume" = 1 ]; then
+    caddy_switch supabase || die "تعذّر تثبيت إعداد Supabase في Caddy قبل إعادة النقل؛ لم يتغير شيء"
+    rm -f -- "$BACKEND_FLAG" "$ETC/switch-pending"
+  fi
+  if [ "$mode" = live ] && [ ! -f "$ETC/backend-was-live" ]; then
+    # الموقع عمل على هذه القاعدة (تحويل سابق انقطع قبل أن يكتب العلامة): لا يستبدلها نقل لاحق دون --replace
+    date -u +%FT%TZ > "$ETC/backend-was-live"
+  fi
+
+  say "١/٦ تنزيل خادم البيانات (PostgREST) وخادم الدخول (GoTrue)…"
+  install_backend_binaries
+  ensure_api_user
+  load_secrets
+
+  say "٢/٦ تجهيز قاعدة $DB على PostgreSQL في السيرفر…"
+  pg_checks
+  # نسخ من تشغيل سابق انقطع (فيها بيانات المشرفين)؛ لا تلزم بين تشغيل وآخر،
+  # والقديمة منها محفوظة في النسخة الاحتياطية التي سبقت الاستبدال
+  drop_db "${DB}_new"
+  drop_db "${DB}_old"
+  case $mode in
+    live)
+      db_utf8_or_die
+      db_has_data || die "الموقع مضبوط على قاعدة السيرفر لكن قاعدة $DB مفقودة أو فارغة؛ لم أنشئ قاعدة فارغة مكانها.
+$(restore_hint)" ;;
+    reattach)
+      db_utf8_or_die
+      db_has_data || die "لا توجد بيانات في قاعدة السيرفر.
+$(restore_hint)
+أو للنقل من جديد من Supabase: sudo dalil-hama-site install-db --replace" ;;
+    transfer)
+      if db_has_data && [ -f "$ETC/backend-was-live" ] && [ "$replace" != 1 ]; then
+        die "قاعدة السيرفر عمل عليها الموقع من قبل؛ لن أستبدلها. للنقل من جديد من Supabase: sudo dalil-hama-site install-db --replace"
+      fi ;;
+  esac
+  # المخطط وواجهة الموقع من الإصدار نفسه: آخر إصدار في الفرع إن كان سليماً، وإلا الإصدار المعروض
+  rel=
+  if [ ! -f "$BASE/PINNED" ]; then rel=$(remote_sha) || rel=; fi
+  if [ -n "$rel" ] && [ -f "$BASE/bad-$rel" ]; then
+    warn "آخر إصدار (${rel:0:7}) مرفوض: $(cat "$BASE/bad-$rel")؛ أبقيت الإصدار الحالي"
+    rel=
+  fi
+  if [ -n "$rel" ]; then
+    # يُجرَّب في عملية فرعية: إصدار مرفوض لا يوقف الأمر بل يبقى الإصدار الحالي
+    set +e; ( set -e; fetch_release "$rel" ) 2>"$STATE/fetch.log"; a=$?; set -e
+    if [ "$a" != 0 ]; then
+      a=$(sed -n 's/^✗ //p' "$STATE/fetch.log" | head -n 1)
+      warn "${a%؛ الموقع باقٍ على الإصدار الحالي}؛ أبقيت الإصدار الحالي"
+      rel=
+    fi
+  fi
+  if [ -z "$rel" ]; then
+    rel=$(current_sha) || die "لا يوجد إصدار مثبّت من الموقع"
+    fetch_release "$rel"
+  fi
+  if [ "$mode" = transfer ]; then
+    say "٣/٦ نقل البيانات من Supabase (لا تعدّل شيئاً في لوحة الإدارة حتى ينتهي)…"
+    fetch_export "$token"
+    build_new_db "$rel"
+    # ما على قاعدة السيرفر الحالية يُحفظ دائماً قبل أن تحل محلها النسخة المنقولة
+    if db_has_data; then
+      say "  حفظ قاعدة السيرفر الحالية قبل أن تحل محلها النسخة المنقولة:"
+      ( BACKUP_TAG=before-replace cmd_backup ) || die "تعذّرت النسخة الاحتياطية من قاعدة السيرفر الحالية؛ لم يتغير شيء"
+    fi
+    swap_in_new_db
+    shred_export
+    ok "نُقلت البيانات ($EXPORT_APPROVED نشاطاً منشوراً)"
+  else
+    db_bootstrap
+    gotrue_migrate
+    db_owner_grants
+    app_migrations "$rel"
+    say "٣/٦ البيانات على السيرفر كما هي (لا نقل جديد)."
+    if [ "$mode" = reattach ]; then
+      warn "ما أُضيف في Supabase منذ db-rollback لا يُنقل. لنقله مع كل البيانات: sudo dalil-hama-site install-db --replace"
+    fi
+  fi
+  pg -d "$DB" -Atc "select name from dh_meta.migrations order by 1" | LC_ALL=C sort > "$ETC/applied-migrations"
+  chmod 644 "$ETC/applied-migrations"
+  if [ "$rel" != "$(current_sha || true)" ]; then
+    activate "$rel"
+    printf '%s\n' "$rel" > "$BASE/last-checked"
+    prune
+  fi
+  rm -f -- "$BASE/.last-error"
+  fix_owner
+
+  say "٤/٦ تشغيل خدمات قاعدة البيانات…"
+  write_backend_configs
+  start_backend
+
+  if [ "$mode" = live ]; then
+    write_override
+    caddy_switch local || die "رفض Caddy إعداد الموقع المحدّث؛ بقي كما كان"
+    backend_serving || die "الموقع لا يقرأ من قاعدة السيرفر كما يجب؛ راجع: sudo dalil-hama-site status"
+    if [ -f "$ETC/switch-pending" ]; then
+      warn "النقل السابق انقطع بعد تحويل الموقع؛ ما أُضيف في Supabase بعد $(cat "$ETC/switch-pending") ليس على السيرفر"
+      rm -f -- "$ETC/switch-pending"
+    fi
+    install_backup_units
+    if [ -z "$(find "$BACKUP_DIR" -maxdepth 1 -name "$DB-*.dump" 2>/dev/null | head -n 1)" ]; then
+      ( QUIET=1 cmd_backup ) || warn "تعذّرت النسخة الاحتياطية؛ جرّب: sudo dalil-hama-site backup"
+    fi
+    fix_owner
+    ok "قاعدة السيرفر وخدماتها محدّثة، والبيانات كما هي."
+    return 0
+  fi
+  if [ "$mode" = reattach ]; then
+    EXPORT_APPROVED=$(pg -d "$DB" -Atc "select count(*) from public.listings where status = 'approved'")
+  fi
+
+  say "٥/٦ تحويل الموقع إلى قاعدة السيرفر…"
+  [ -f "$ETC/backend-was-live" ] && had_marker=1
+  # الرجوع إلى Supabase: العلامات تُحذف فقط إن تحوّل Caddy فعلاً، وإلا تبقى الحالة «السيرفر» كما هي في الواقع.
+  # وبعد أن وصل الزوار إلى قاعدة السيرفر (switched=1) تبقى علامة backend-was-live كي لا يستبدلها نقل لاحق دون نسخة احتياطية
+  switch_back() {
+    caddy_switch supabase || return 1
+    rm -f -- "$BACKEND_FLAG" "$ETC/switch-pending"
+    if [ "$had_marker" = 0 ] && [ "$switched" = 0 ]; then rm -f -- "$ETC/backend-was-live"; fi
+  }
+  switch_abort() {
+    trap '' INT TERM HUP   # إشارة ثانية لا تقطع الرجوع في منتصفه
+    if switch_back >/dev/null 2>&1; then warn "قُطع الأمر فأعدت الموقع إلى Supabase"
+    else warn "قُطع الأمر والموقع قد يقرأ من قاعدة السيرفر؛ راجع: sudo dalil-hama-site status (للرجوع: sudo dalil-hama-site db-rollback)"; fi
+    exit 130
+  }
+  trap switch_abort INT TERM HUP
+  write_override force
+  fix_owner
+  # العلامات قبل Caddy: إن انقطع الأمر بعد التحويل، يُكمله تشغيله من جديد ولا يستبدل نقلٌ لاحق ما كُتب على السيرفر؛
+  # وswitch-pending تبقى حتى يثبت أن الموقع يقرأ من السيرفر (وإلا يُعاد النقل بنسخة جديدة)
+  touch "$BACKEND_FLAG"
+  date -u '+%F %H:%M UTC' > "$ETC/switch-pending"
+  date -u +%FT%TZ > "$ETC/backend-was-live"
+  switched=1
+  if ! caddy_switch local; then
+    # Caddy رفض الإعداد فبقي على ما كان (Supabase): لم يصل أحد إلى قاعدة السيرفر
+    switched=0
+    rm -f -- "$BACKEND_FLAG" "$ETC/switch-pending"
+    if [ "$had_marker" = 0 ]; then rm -f -- "$ETC/backend-was-live"; fi
+    trap - INT TERM HUP
+    die "تعذّر تحويل Caddy؛ الموقع ما زال يقرأ من Supabase كما كان"
+  fi
+  if ! backend_serving "$EXPORT_APPROVED"; then
+    if switch_back; then
+      trap - INT TERM HUP
+      die "الموقع لم يقرأ من قاعدة السيرفر كما يجب فأعدته إلى Supabase. راجع: sudo dalil-hama-site status ثم أعد النقل: sudo dalil-hama-site install-db --replace (يحفظ ما كُتب على السيرفر في نسخة احتياطية أولاً)"
+    fi
+    trap - INT TERM HUP
+    die "الموقع لم يقرأ من قاعدة السيرفر كما يجب، وتعذّرت إعادته إلى Supabase فبقي على قاعدة السيرفر. راجع: sudo dalil-hama-site status (للرجوع: sudo dalil-hama-site db-rollback)"
+  fi
+  rm -f -- "$ETC/switch-pending"
+  trap - INT TERM HUP
+  ok "الموقع يقرأ الآن من قاعدة السيرفر"
+
+  say "٦/٦ النسخ الاحتياطي الليلي…"
+  install_backup_units
+  ( QUIET=1 cmd_backup ) || warn "تعذّرت النسخة الاحتياطية الأولى؛ جرّب: sudo dalil-hama-site backup"
+
+  say ""
+  ok "تم. بيانات دليل حماة الآن على سيرفركم (PostgreSQL، قاعدة $DB)."
+  say "  • أغلق أي تبويب للوحة الإدارة أو للدليل كان مفتوحاً قبل النقل وافتحه من جديد؛ التبويب القديم يبقى على Supabase."
+  say "  • لوحة الإدارة تعمل بالبريد وكلمة المرور نفسيهما."
+  say "  • نسخة احتياطية كل ليلة في $BACKUP_DIR (تُحفظ 14 يوماً)."
+  say "  • للرجوع إلى Supabase عند الحاجة:  sudo dalil-hama-site db-rollback"
+}
+
+cmd_backup() {
+  [ "${1:-}" = --quiet ] && QUIET=1
+  need_root backup
+  db_exists || die "لا توجد قاعدة $DB على هذا السيرفر"
+  mkdir -p "$BACKUP_DIR"; chmod 700 "$BACKUP_DIR"
+  local out
+  # بقايا نسخ انقطعت (أقدم من ساعة، فلا تمس نسخة جارية الآن)
+  find "$BACKUP_DIR" -maxdepth 1 -name "$DB-*.dump.tmp" -mmin +60 -delete 2>/dev/null || true
+  out=$BACKUP_DIR/$DB-${BACKUP_TAG:+$BACKUP_TAG-}$(date -u +%Y%m%d-%H%M%S).dump
+  runuser -u postgres -- pg_dump -Fc "$DB" > "$out.tmp" || { rm -f -- "$out.tmp"; die "فشل النسخ الاحتياطي"; }
+  [ "$(stat -c%s "$out.tmp")" -gt 2000 ] || { rm -f -- "$out.tmp"; die "النسخة الاحتياطية صغيرة على نحو غير طبيعي؛ لم تُحفظ"; }
+  chmod 600 "$out.tmp"; mv -f -- "$out.tmp" "$out"
+  # التدوير للنسخ الليلية فقط؛ نسخ ما قبل الاستبدال أو الاسترجاع (before-*) تبقى
+  find "$BACKUP_DIR" -maxdepth 1 -name "$DB-2*.dump" -mtime +14 -delete
+  ok "نسخة احتياطية: $out ($(du -h "$out" | cut -f1))"
+}
+
+cmd_db_rollback() {
+  need_root db-rollback
+  detect_caddy
+  take_lock
+  # الإعداد قد يبقى موجَّهاً إلى السيرفر دون العلامة (رجوع سابق انقطع بإصدار أقدم من هذا الأمر)
+  [ -f "$BACKEND_FLAG" ] || grep -q 'handle_path /rest/v1/' "$SITE_CONF" 2>/dev/null || site_on_server ||
+    die "الموقع يقرأ من Supabase أصلاً"
+  # العلامة تُحذف بعد نجاح التحويل فقط: انقطاع الأمر يترك الحالة «السيرفر» ويكفي تكراره
+  caddy_switch supabase || die "تعذّر تفعيل الإعداد؛ بقي الموقع على قاعدة السيرفر"
+  rm -f -- "$BACKEND_FLAG" "$ETC/switch-pending"
+  ok "عاد الموقع إلى قراءة البيانات من Supabase."
+  warn "ما أُضيف أو عُدّل على قاعدة السيرفر منذ النقل ليس في Supabase. قاعدة السيرفر باقية كما هي."
+  say "  للعودة إلى قاعدة السيرفر كما هي:  sudo dalil-hama-site install-db"
+  say "  أو لنقل جديد من Supabase يشمل ما يُضاف فيها من الآن (مع نسخة احتياطية من قاعدة السيرفر أولاً):"
+  say "                                    sudo dalil-hama-site install-db --replace"
+}
+
+# استرجاع نسخة احتياطية في قاعدة مؤقتة ثم وضعها مكان القاعدة الحالية دفعة واحدة؛
+# الأدوار تُنشأ أولاً (عنقود PostgreSQL أُعيد إنشاؤه لا يحويها)
+cmd_db_restore() {
+  need_root db-restore
+  need_tools psql pg_restore pg_dump runuser flock python3
+  local file=${1:-} n new=${DB}_new
+  systemctl is-active --quiet postgresql || die "PostgreSQL لا يعمل على هذا السيرفر"
+  mkdir -p "$STATE"; chmod 700 "$STATE"
+  take_lock
+  if [ -z "$file" ]; then file=$(ls -1t -- "$BACKUP_DIR/$DB-"*.dump 2>/dev/null | head -n 1) || file=; fi
+  [ -n "$file" ] && [ -f "$file" ] || die "لا توجد نسخة احتياطية في $BACKUP_DIR"
+  load_secrets
+  pg_checks
+  db_roles
+  drop_db "$new"
+  pg -c "set client_min_messages = warning" \
+     -c "create database $new owner dalil_owner encoding 'UTF8' lc_collate 'C.UTF-8' lc_ctype 'C.UTF-8' template template0" \
+     -c "revoke all on database $new from public" \
+     -c "grant connect, temporary on database $new to authenticator, supabase_auth_admin" >/dev/null
+  say "استرجاع ${file##*/}…"
+  if ! runuser -u postgres -- pg_restore --exit-on-error -d "$new" < "$file" 2>"$STATE/restore.log"; then
+    tail -n 5 "$STATE/restore.log" >&2
+    drop_db "$new"
+    die "تعذّر استرجاع ${file##*/}؛ لم يتغير شيء"
+  fi
+  n=$(pg -d "$new" -Atc "select count(*) from public.listings" 2>/dev/null) || n=0
+  if [ "${n:-0}" -le 0 ]; then drop_db "$new"; die "النسخة ${file##*/} لا تحوي أنشطة؛ لم يتغير شيء"; fi
+  if db_has_data; then
+    say "  حفظ القاعدة الحالية قبل أن تحل محلها النسخة المسترجعة:"
+    ( BACKUP_TAG=before-restore cmd_backup ) || { drop_db "$new"; die "تعذّرت النسخة الاحتياطية من القاعدة الحالية؛ لم يتغير شيء"; }
+  fi
+  swap_in_new_db
+  ok "استُرجعت ${file##*/} ($n نشاطاً)"
+  if [ -f "$BACKEND_FLAG" ]; then
+    # تشغيل الخدمات على القاعدة المسترجعة والتحقق أن الموقع يقرأ منها
+    cmd_install_db
+  else
+    say "  الموقع يقرأ من Supabase الآن؛ للعودة إلى قاعدة السيرفر:  sudo dalil-hama-site install-db"
+  fi
+}
+
+unit_state() {
+  local st
+  st=$(systemctl is-active "$1" 2>/dev/null) || true
+  case $st in
+    active) echo "يعمل" ;;
+    inactive) echo "متوقف" ;;
+    failed) echo "متعطّل" ;;
+    activating|reloading) echo "يبدأ" ;;
+    '') echo "غير معروف" ;;
+    *) echo "$st" ;;
+  esac
+}
+
+cmd_status() {
+  load_conf
+  local cur served remote note=
+  cur=$(current_sha) || cur=
+  served=$(served_sha) || served=
+  remote=$(remote_sha) || remote=
+  if [ -n "$remote" ] && [ "$remote" != "$cur" ]; then
+    if [ -f "$BASE/bad-$remote" ]; then note=" (مرفوض: $(cat "$BASE/bad-$remote"))"
+    elif [ -n "$(missing_migrations "$remote" | tr -d ' ')" ]; then note=" (ينتظر تحديث قاعدة البيانات: sudo dalil-hama-site install-db)"
+    elif [ "$remote" = "$(cat "$BASE/last-checked" 2>/dev/null || true)" ]; then note=" (لا تغيير في ملفات الموقع)"
+    else note=" (يُطبَّق خلال 10 دقائق)"; fi
+  fi
+  say "النطاق:            https://$HOST"
+  say "المصدر:            github.com/$REPO ($BRANCH)"
+  say "الإصدار المثبّت:    ${cur:0:7}"
+  if [ -n "$served" ]; then say "الإصدار المعروض:    ${served:0:7}"
+  else say "الإصدار المعروض:    — (النطاق لا يعرض الموقع الجديد)"; fi
+  if [ -n "$remote" ]; then say "آخر إصدار متاح:     ${remote:0:7}$note"
+  else say "آخر إصدار متاح:     — (تعذّر الوصول إلى GitHub)"; fi
+  if [ -f "$BASE/PINNED" ]; then say "التحديث التلقائي:   موقوف (sudo dalil-hama-site resume)"
+  else say "التحديث التلقائي:   $(unit_state "$UNIT.timer")"; fi
+  if [ -s "$BASE/.last-error" ]; then say "آخر خطأ في التحديث:  $(cat "$BASE/.last-error")"; fi
+  say "الموقع القديم:      $(unit_state dalil-hama)"
+  local on_server=0
+  if [ -n "$served" ] && site_on_server; then on_server=1; fi
+  if [ -f "$BACKEND_FLAG" ]; then
+    local n last
+    n=$(pg -d "$DB" -Atc "select count(*) from public.listings where status = 'approved'" 2>/dev/null) || n="؟"
+    last=$( { find "$BACKUP_DIR" -maxdepth 1 -name "$DB-*.dump" -printf '%TY-%Tm-%Td %TH:%TM\n' 2>/dev/null || true; } | sort | tail -n 1)
+    say "قاعدة البيانات:     السيرفر ($DB، $n نشاطاً منشوراً)"
+    if [ -n "$served" ] && [ "$on_server" = 0 ]; then
+      say "  ! لكن الموقع لا يقرأ منها الآن (تحويل لم يكتمل): sudo dalil-hama-site install-db"
+    fi
+    say "خدمة البيانات:      $(unit_state dalil-hama-api)    خدمة الدخول: $(unit_state dalil-hama-auth)"
+    say "آخر نسخة احتياطية:  ${last:-لا يوجد}"
+  else
+    say "قاعدة البيانات:     Supabase"
+    if [ "$on_server" = 1 ]; then
+      say "  ! لكن الموقع ما زال يقرأ من قاعدة السيرفر: sudo dalil-hama-site db-rollback"
+    fi
+  fi
+}
+
+usage() {
+  awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "${BASH_SOURCE[0]}"
+}
+
+case ${1:-} in
+  install)  cmd_install ;;
+  update)   shift; cmd_update "$@" ;;
+  previous) cmd_previous ;;
+  resume)   cmd_resume ;;
+  rollback) cmd_rollback ;;
+  status)   cmd_status ;;
+  install-db)  shift; cmd_install_db "$@" ;;
+  backup)      shift; cmd_backup "$@" ;;
+  db-restore)  shift; cmd_db_restore "$@" ;;
+  db-rollback) cmd_db_rollback ;;
+  *)        usage; exit 2 ;;
+esac

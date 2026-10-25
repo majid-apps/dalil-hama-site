@@ -1,0 +1,31 @@
+# إعداد Render كموقع ثابت (Static Site). يمكن استخدامه كـ Blueprint أو كمرجع للإعدادات في لوحة Render.
+services:
+  - type: web
+    name: dalil-hama
+    runtime: static
+    rootDir: dalil-hama
+    buildCommand: echo "static site — no build needed"
+    staticPublishPath: public
+    headers:
+      - path: /assets/fonts/*
+        name: Cache-Control
+        value: public, max-age=31536000, immutable
+      - path: /assets/img/*
+        name: Cache-Control
+        value: public, max-age=604800
+      - path: /sw.js
+        name: Cache-Control
+        value: no-cache
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin
+      - path: /admin/*
+        name: X-Robots-Tag
+        value: noindex, nofollow
+    routes:
+      - type: rewrite
+        source: /admin
+        destination: /admin/index.html

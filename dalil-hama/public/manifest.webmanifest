@@ -1,0 +1,24 @@
+{
+  "name": "دليل حماة",
+  "short_name": "دليل حماة",
+  "description": "أرقام وعناوين مدينة حماة بين يديك — ابحث واتصل بلمسة واحدة.",
+  "lang": "ar",
+  "dir": "rtl",
+  "start_url": "/?source=pwa",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0a3a35",
+  "theme_color": "#0a3a35",
+  "categories": ["lifestyle", "utilities", "navigation"],
+  "icons": [
+    { "src": "/assets/img/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/assets/img/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/assets/img/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "صيدليات", "url": "/?q=صيدلية", "icons": [{ "src": "/assets/img/icon-192.png", "sizes": "192x192" }] },
+    { "name": "الأقرب إليّ", "url": "/?v=near", "icons": [{ "src": "/assets/img/icon-192.png", "sizes": "192x192" }] },
+    { "name": "أضف نشاطك", "url": "/#add", "icons": [{ "src": "/assets/img/icon-192.png", "sizes": "192x192" }] }
+  ]
+}
