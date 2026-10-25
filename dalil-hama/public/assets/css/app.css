@@ -464,3 +464,5 @@ select.input { appearance: none; -webkit-appearance: none; background-image: url
 /* زر لوحة الإدارة: يظهر فقط للمدير المسجّل دخوله في هذا المتصفح */
 .admin-fab { position: fixed; z-index: 40; inset-inline-start: 14px; bottom: calc(78px + env(safe-area-inset-bottom)); display: inline-flex; align-items: center; gap: 6px; min-height: 40px; padding: 0 14px; border-radius: 999px; background: var(--ink); color: var(--surface); font-size: 13px; font-weight: 700; box-shadow: 0 8px 22px -8px rgba(0,0,0,.45); }
 @media (min-width: 900px) { .admin-fab { bottom: 20px; } }
+
+.admin-fab.preview { background: var(--gold-2, #e6b34a); color: #241904; }

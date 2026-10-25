@@ -31,7 +31,13 @@ const state = {
 };
 
 // المدير المسجّل دخوله (من هذا المتصفح) يرى أزرار تعديل سريعة تفتح لوحة الإدارة مباشرة؛ الزائر العادي لا يرى شيئاً
-const adminOn = () => { const s = store.get('dh:admin-session'); return !!(s && s.refresh_token); };
+const hasAdminSession = () => { const s = store.get('dh:admin-session'); return !!(s && s.refresh_token); };
+// معاينة «كما يراه الزائر»: ?preview=visitor تُخفي كل أدوات الإدارة طوال الجلسة، ويبقى زر صغير للعودة
+const previewOn = () => {
+  const q = /[?&]preview=visitor/.test(location.search);
+  try { if (q) sessionStorage.setItem('dh:preview', '1'); return sessionStorage.getItem('dh:preview') === '1'; } catch { return q; }
+};
+const adminOn = () => hasAdminSession() && !previewOn();
 
 // ─────────────── البيانات والمزامنة ───────────────
 
@@ -255,8 +261,9 @@ function renderChrome() {
     `<button type="button" data-act="share-site">${I('share')}شارك الدليل</button>`,
   ].filter(Boolean).join('');
   updateFavDot();
-  if (adminOn() && !$('#admin-fab') && !/[?&]preview=visitor/.test(location.search)) {
-    document.body.insertAdjacentHTML('beforeend', `<a class="admin-fab" id="admin-fab" href="/admin/">${I('settings', 'sm')}لوحة الإدارة</a>`);
+  if (hasAdminSession() && !$('#admin-fab')) {
+    const pv = previewOn();
+    document.body.insertAdjacentHTML('beforeend', `<a class="admin-fab${pv ? ' preview' : ''}" id="admin-fab" href="/admin/">${I(pv ? 'back' : 'settings', 'sm')}${pv ? 'معاينة الزائر — العودة للإدارة' : 'لوحة الإدارة'}</a>`);
   }
 }
 

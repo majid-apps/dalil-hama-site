@@ -97,7 +97,7 @@ const rep = { Prefer: 'return=representation' };
 // ─────────────── الحالة ───────────────
 
 const A = {
-  me: null, listings: [], byId: new Map(), cats: [], catById: new Map(), areas: [], settings: {}, stats: null, reports: [], admins: [],
+  me: null, listings: [], byId: new Map(), cats: [], catById: new Map(), areas: [], settings: {}, stats: null, reports: [], admins: [], inboxTab: 'req',
   index: new SearchIndex(), f: { q: '', cat: '', status: 'approved', flag: '', area: '', sort: 'new' }, selected: new Set(), page: 0, reportTab: 'open',
 };
 
@@ -208,10 +208,10 @@ function renderLogin(msg = '') {
 // ─────────────── الهيكل والتنقل ───────────────
 
 const VIEWS = [
-  ['dash', 'الرئيسية', 'chart'],
-  ['pending', 'طلبات الإضافة', 'inbox'],
-  ['reports', 'البلاغات', 'flag'],
-  ['listings', 'الأنشطة', 'list'],
+  ['dash', 'الإدارة', 'chart'],
+  ['cands', 'المرشحون', 'tag'],
+  ['inbox', 'الطلبات والبلاغات', 'inbox'],
+  ['listings', 'البرنامج العام', 'list'],
   ['quality', 'جودة البيانات', 'check'],
   ['-'],
   ['cats', 'التصنيفات', 'grid'],
@@ -220,6 +220,17 @@ const VIEWS = [
   ['log', 'سجل التعديلات', 'history'],
   ['settings', 'الإعدادات', 'settings'],
 ];
+
+// الشريط السفلي: خمس شاشات. الصفحات الثانوية (جودة، تصنيفات، أحياء…) تتبع «الإدارة».
+const TABS = [
+  ['dash', 'الإدارة', 'chart'],
+  ['cands', 'المرشحون', 'tag'],
+  ['inbox', 'الطلبات', 'inbox'],
+  ['listings', 'البرنامج العام', 'list'],
+  ['preview', 'المعاينة', 'eye'],
+];
+const TAB_OF = { quality: 'dash', cats: 'dash', areas: 'dash', io: 'dash', log: 'dash', settings: 'dash' };
+const ALIAS = { pending: ['inbox', 'req'], reports: ['inbox', 'rep'] };
 
 function renderShell() {
   $('#app').innerHTML = `<div class="shell">
@@ -236,6 +247,9 @@ function renderShell() {
       </div>
     </aside>
     <div class="scrim" id="scrim" hidden></div>
+    <nav class="tabbar" id="tabbar" aria-label="الشاشات">${TABS.map(([k, l, ic]) => (k === 'preview'
+    ? `<a href="/?preview=visitor" data-tab="${k}">${I(ic)}<span>${l}</span></a>`
+    : `<a href="#${k}" data-tab="${k}">${I(ic)}<span>${l}</span><b class="n" data-count="${k}" hidden></b></a>`)).join('')}</nav>
     <div class="main">
       <header class="bar"><button class="icon-btn menu" type="button" id="menu" aria-label="القائمة">${I('menu')}</button><h1 id="title"></h1><div id="bar-actions" style="display:flex;gap:8px"></div></header>
       <div class="content" id="content"></div>
@@ -262,16 +276,11 @@ function renderShell() {
 
 function renderNavCounts() {
   const s = A.stats || {};
-  const set = (k, n, soft = false) => {
-    const el = $(`[data-count="${k}"]`);
-    if (!el) return;
-    el.hidden = !n;
-    el.textContent = fmtNum(n || 0);
-    el.classList.toggle('soft', soft);
-  };
-  set('pending', s.pending);
-  set('reports', s.reports_open);
-  set('listings', s.approved, true);
+  const cands = A.listings.filter(isCand).length;
+  const reqs = A.listings.filter((r) => r.status === 'pending' && !isCand(r)).length;
+  $$('[data-count="cands"]').forEach((el) => { el.hidden = !cands; el.textContent = fmtNum(cands); });
+  $$('[data-count="inbox"]').forEach((el) => { const n = reqs + (s.reports_open || 0); el.hidden = !n; el.textContent = fmtNum(n); });
+  $$('[data-count="listings"]').forEach((el) => { el.hidden = !s.approved; el.textContent = fmtNum(s.approved || 0); el.classList.add('soft'); });
 }
 
 /** روابط سريعة من الدليل العام: ‎#edit/12 يفتح تعديل النشاط، و‎#new يفتح نشاطاً جديداً (مع ‎#new?name=…&phone=…) */
@@ -287,11 +296,14 @@ function route() {
   const dl = deepLink();
   let v = location.hash.slice(1).split('?')[0].split('/')[0] || 'dash';
   if (dl) v = 'listings';
+  if (ALIAS[v]) { A.inboxTab = ALIAS[v][1]; v = ALIAS[v][0]; }
   const def = VIEWS.find((x) => x[0] === v) || VIEWS[0];
   $$('#nav a').forEach((a) => (a.dataset.view === def[0] ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current')));
+  const tab = TAB_OF[def[0]] || def[0];
+  $$('#tabbar a').forEach((a) => (a.dataset.tab === tab ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current')));
   $('#title').textContent = def[1];
   $('#bar-actions').innerHTML = '';
-  const fn = { dash: viewDash, pending: viewPending, reports: viewReports, listings: viewListings, quality: viewQuality, cats: viewCats, areas: viewAreas, io: viewIO, log: viewLog, settings: viewSettings }[def[0]];
+  const fn = { dash: viewDash, cands: viewCands, inbox: viewInbox, listings: viewListings, quality: viewQuality, cats: viewCats, areas: viewAreas, io: viewIO, log: viewLog, settings: viewSettings }[def[0]];
   window.scrollTo(0, 0);
   fn($('#content'));
   if (dl) {
@@ -305,6 +317,7 @@ function route() {
 window.addEventListener('hashchange', () => { if (A.me) { closeSheet(); route(); } });
 
 async function start() {
+  try { sessionStorage.removeItem('dh:preview'); } catch { /* ignore */ }
   if (!auth.session) return renderLogin();
   try {
     A.me = await rpc('admin_me');
@@ -328,13 +341,26 @@ const phonesHtml = (r) => (r.phones || []).map((p) => `<bdi dir="ltr">${esc(form
 const st = (s, map = STATUS) => `<span class="st ${s}">${map[s] || s}</span>`;
 const fmtDate = (d) => new Date(d).toLocaleString('ar-SY', { dateStyle: 'medium', timeStyle: 'short' });
 
+/** أزرار التحكم بكل بطاقة: اتصال، واتساب، خريطة، عرض، دمج، حذف، تعديل */
+function rowOps(r) {
+  const ph = (r.phones || [])[0];
+  const wa = r.whatsapp || (ph && isMobile(ph) && !r.no_whatsapp ? ph : '');
+  const map = safeUrl(r.map_url) || (r.lat && r.lng ? `https://www.google.com/maps/search/?api=1&query=${r.lat},${r.lng}` : '');
+  const ib = (href, ic, label, extra = '') => `<a class="icon-btn" href="${href}" aria-label="${label}" title="${label}" ${extra}>${I(ic, 'sm')}</a>`;
+  return `${ph ? ib(telHref(ph), 'phone', 'اتصال') : ''}${wa ? ib(waHref(wa), 'wa', 'واتساب', 'target="_blank" rel="noopener"') : ''}${map ? ib(esc(map), 'map', 'الخريطة', 'target="_blank" rel="noopener"') : ''}`
+    + `${ib(`/?l=${r.id}`, 'eye', 'عرض في الدليل')}`
+    + `<button class="icon-btn" type="button" data-mergerow="${r.id}" aria-label="دمج مع بطاقة أخرى" title="دمج">${I('merge', 'sm')}</button>`
+    + `<button class="icon-btn danger" type="button" data-delrow="${r.id}" aria-label="حذف" title="حذف">${I('trash', 'sm')}</button>`
+    + `<button class="btn btn-soft" type="button" data-edit="${r.id}">${I('edit', 'sm')}تعديل</button>`;
+}
+
 function listingRow(r, { select = true, ops = '' } = {}) {
   const flags = [r.featured && I('star', 'sm'), r.verified && I('verified', 'sm'), (r.lat || r.map_url) && I('pin', 'sm')].filter(Boolean).join('');
   return `<div class="row${A.selected.has(r.id) ? ' sel' : ''}" data-id="${r.id}">
     ${select ? `<input type="checkbox" data-sel="${r.id}" ${A.selected.has(r.id) ? 'checked' : ''} aria-label="تحديد">` : `<span class="avatar" style="width:40px;height:40px;font-size:20px;border-radius:12px;--hue:${catHue(r.category_id)}">${catIcon(r.category_id)}</span>`}
     <div style="min-width:0"><div class="nm">${select ? `${catIcon(r.category_id)} ` : ''}${esc(r.name)} <span class="flags" style="color:var(--brand)">${flags}</span></div>
       <div class="sub"><span>#${r.id}</span><span>${esc(catName(r.category_id))}</span>${r.area ? `<span>${esc(r.area)}</span>` : ''}<span>${phonesHtml(r)}</span>${r.status !== 'approved' ? st(r.status) : ''}</div></div>
-    <div class="ops">${ops || `<a class="btn btn-ghost" href="/?l=${r.id}" aria-label="عرض في الدليل" title="عرض في الدليل">${I('eye', 'sm')}</a><button class="btn btn-soft" type="button" data-edit="${r.id}">${I('edit', 'sm')}تعديل</button>`}</div>
+    <div class="ops">${ops || rowOps(r)}</div>
   </div>`;
 }
 
@@ -482,8 +508,11 @@ function viewDash(el) {
     <div class="quick-links">
       <a class="btn btn-primary" href="/">${I('external', 'sm')}فتح الدليل العام</a>
       <a class="btn btn-gold" href="#new">${I('plus', 'sm')}نشاط جديد</a>
-      <a class="btn btn-soft" href="#pending">${I('inbox', 'sm')}طلبات الإضافة</a>
-      <a class="btn btn-soft" href="#reports">${I('flag', 'sm')}البلاغات</a>
+      <a class="btn btn-soft" href="#inbox">${I('inbox', 'sm')}الطلبات والبلاغات</a>
+    </div>
+    <div class="more-links">
+      <a href="#quality">${I('check')}جودة البيانات</a><a href="#cats">${I('grid')}التصنيفات</a><a href="#areas">${I('pin')}الأحياء</a>
+      <a href="#io">${I('download')}استيراد وتصدير</a><a href="#log">${I('history')}سجل التعديلات</a><a href="#settings">${I('settings')}الإعدادات</a>
     </div>
     <div class="kpis">
       <a class="kpi good" href="#listings"><small>منشور</small><b>${fmtNum(s.approved)}</b></a>
@@ -509,10 +538,17 @@ function viewDash(el) {
 
 // ─────────────── طلبات الإضافة ───────────────
 
-function viewPending(el) {
-  const rows = A.listings.filter((r) => r.status === 'pending').sort((a, b) => b.id - a.id);
+/** المرشح: رقم أضافته الإدارة أو استوردته للمراجعة (لم يطلب صاحبه الإضافة). الطلب: ما أرسله الزوار بأنفسهم. */
+const isCand = (r) => r.status === 'pending' && r.source !== 'public';
+const CONSENT_MSG = (name) => `السلام عليكم ورحمة الله،\nنحن فريق «دليل حماة — حماة بين يديك»، دليل إلكتروني مجاني لأهل المدينة.\nيسعدنا إدراج «${name}» (الاسم والتصنيف والرقم فقط) في الدليل، ولن نضيفه إلا بموافقتكم.\n✅ للموافقة أرسلوا كلمة «موافق».\n❌ وإن لم ترغبوا فلا حاجة للرد، ولن يُنشر شيء.\nشاكرين لكم 🌿`;
+
+function viewPending(el, mode = 'req') {
+  const cand = mode === 'cand';
+  const rows = A.listings.filter((r) => r.status === 'pending' && cand === isCand(r)).sort((a, b) => b.id - a.id);
   if (!rows.length) {
-    el.innerHTML = `<div class="empty"><div class="big">🎉</div><h3>لا توجد طلبات معلّقة</h3><p>كل طلبات الإضافة تمت مراجعتها.</p></div>`;
+    el.innerHTML = cand
+      ? `<div class="empty"><div class="big">📋</div><h3>لا يوجد مرشحون</h3><p>الأرقام التي تستوردها «كمرشحين» تظهر هنا للتواصل مع أصحابها قبل النشر. استخدمها من «استيراد وتصدير».</p></div>`
+      : `<div class="empty"><div class="big">🎉</div><h3>لا توجد طلبات معلّقة</h3><p>كل طلبات الإضافة تمت مراجعتها.</p></div>`;
     return;
   }
   el.innerHTML = rows.map((r) => {
@@ -527,13 +563,14 @@ function viewPending(el) {
         ${safeUrl(r.map_url) ? `<dt>الخريطة</dt><dd><a href="${esc(safeUrl(r.map_url))}" target="_blank" rel="noopener" style="color:var(--brand)">فتح الرابط</a></dd>` : ''}
         ${r.website ? `<dt>الموقع</dt><dd dir="ltr" style="text-align:right">${esc(r.website)}</dd>` : ''}
         ${r.description ? `<dt>النبذة</dt><dd>${esc(r.description)}</dd>` : ''}
+        ${cand ? `<dt>الحالة</dt><dd>مرشّح — لا تنشره قبل موافقة صاحب الرقم</dd>` : ''}
         ${r.submitter_name || r.submitter_phone ? `<dt>المُرسِل</dt><dd>${esc(r.submitter_name || '')} ${r.submitter_phone ? `<bdi dir="ltr">${esc(r.submitter_phone)}</bdi>` : ''}</dd>` : ''}
       </dl>
       ${dupIds.length ? `<div class="warnbox">${I('alert', 'sm')}الرقم موجود مسبقاً في: ${dupIds.map((d) => `<a href="#" data-edit="${d.id}" style="font-weight:700">${esc(d.name)}</a>`).join('، ')}</div>` : ''}
       <div class="ops">
-        <button class="btn btn-primary" data-approve="${r.id}">${I('check', 'sm')}قبول ونشر</button>
+        <button class="btn btn-primary" data-approve="${r.id}">${I('check', 'sm')}${cand ? 'وافق — انشر' : 'قبول ونشر'}</button>
         <button class="btn btn-soft" data-edit="${r.id}">${I('edit', 'sm')}مراجعة وتعديل</button>
-        ${mob ? `<a class="btn btn-wa" href="${waHref(mob, `مرحباً، وصلنا طلب إضافة «${r.name}» إلى دليل حماة. نود التأكد من صحة البيانات قبل النشر 🌿`)}" target="_blank" rel="noopener">${I('wa', 'sm')}تحقق عبر واتساب</a>` : ''}
+        ${mob ? `<a class="btn btn-wa" href="${waHref(mob, cand ? CONSENT_MSG(r.name) : `مرحباً، وصلنا طلب إضافة «${r.name}» إلى دليل حماة. نود التأكد من صحة البيانات قبل النشر 🌿`)}" target="_blank" rel="noopener">${I('wa', 'sm')}${cand ? 'طلب الموافقة واتساب' : 'تحقق عبر واتساب'}</a>` : ''}
         ${r.phones && r.phones[0] ? `<a class="btn btn-soft" href="${telHref(r.phones[0])}">${I('phone', 'sm')}اتصال</a>` : ''}
         <button class="btn btn-danger" data-reject="${r.id}">${I('x', 'sm')}رفض</button>
       </div></div>`;
@@ -548,9 +585,31 @@ function viewPending(el) {
       upsertLocal(row);
       toast(ap ? 'تم النشر ✓' : 'تم الرفض');
       refreshStats();
-      viewPending(el);
+      renderNavCounts();
+      viewPending(el, mode);
     } catch (err) { toast(errMsg(err), true); }
   };
+}
+
+// ─────────────── المرشحون ───────────────
+
+function viewCands(el) {
+  el.innerHTML = `<div class="warnbox" style="margin-bottom:12px">${I('info', 'sm')}المرشحون أرقام للمراجعة فقط، لا تظهر في الدليل. تواصل مع صاحب الرقم (اتصال أو رسالة الموافقة)، وبعد موافقته اضغط «وافق — انشر».</div><div id="cand-box"></div>`;
+  viewPending($('#cand-box'), 'cand');
+}
+
+// ─────────────── الطلبات والبلاغات ───────────────
+
+function viewInbox(el) {
+  const reqs = A.listings.filter((r) => r.status === 'pending' && !isCand(r)).length;
+  const reps = A.reports.filter((r) => r.status === 'open').length;
+  const tab = A.inboxTab;
+  el.innerHTML = `<div class="toolbar"><div class="seg-tabs">
+      <button type="button" data-itab="req" aria-pressed="${tab === 'req'}">طلبات الانضمام (${fmtNum(reqs)})</button>
+      <button type="button" data-itab="rep" aria-pressed="${tab === 'rep'}">البلاغات (${fmtNum(reps)})</button></div></div><div id="inbox-box"></div>`;
+  el.querySelectorAll('[data-itab]').forEach((b) => b.addEventListener('click', () => { A.inboxTab = b.dataset.itab; viewInbox(el); }));
+  const box = $('#inbox-box');
+  if (tab === 'rep') viewReports(box); else viewPending(box, 'req');
 }
 
 // ─────────────── البلاغات ───────────────
@@ -1158,11 +1217,13 @@ function viewIO(el) {
     const updates = mapped.filter((o) => o.id && A.byId.has(o.id));
     const inserts = mapped.filter((o) => !(o.id && A.byId.has(o.id)));
     $('#import-preview').innerHTML = `<div class="warnbox mt">${I('info', 'sm')}الملف يحتوي ${fmtNum(mapped.length + skipped)} نشاطاً: ${fmtNum(updates.length)} للتحديث و${fmtNum(inserts.length)} جديد${skipped ? `، و${fmtNum(skipped)} موجود مسبقاً في الدليل سيُتجاهل (ملف الدليل القديم لا يُحدِّث البيانات المنظّفة)` : ''}.</div>
+      <label class="toggles mt" style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="imp-cand"> استيرادهم كـ«مرشحين» للمراجعة (لا يُنشرون حتى توافق عليهم)</label>
       <div class="toolbar mt"><button class="btn btn-primary" id="do-import">${I('upload', 'sm')}تنفيذ الاستيراد</button></div>`;
     $('#do-import').onclick = async (e) => {
       e.target.disabled = true;
       e.target.textContent = 'جارٍ الاستيراد…';
       try {
+        if ($('#imp-cand') && $('#imp-cand').checked) inserts.forEach((o) => { o.status = 'pending'; o.source = 'import'; });
         const groups = new Map();
         for (const o of updates) {
           const k = Object.keys(o).sort().join(',');
@@ -1299,9 +1360,20 @@ function emRow(e) {
 
 // ─────────────── عام ───────────────
 
-document.addEventListener('click', (e) => {
+document.addEventListener('click', async (e) => {
+  if (!A.me) return;
   const ed = e.target.closest('[data-edit]');
-  if (ed && A.me) { e.preventDefault(); editListing(Number(ed.dataset.edit)); }
+  if (ed) { e.preventDefault(); editListing(Number(ed.dataset.edit)); return; }
+  const mg = e.target.closest('[data-mergerow]');
+  if (mg) { e.preventDefault(); mergeDialog(Number(mg.dataset.mergerow)); return; }
+  const dl = e.target.closest('[data-delrow]');
+  if (dl) {
+    e.preventDefault();
+    const id = Number(dl.dataset.delrow);
+    const r = A.byId.get(id);
+    if (!r || !(await confirmBox(`حذف «${esc(r.name)}» نهائياً؟ يمكنك بدلاً من ذلك تغيير حالته إلى «مخفي».`, { ok: 'حذف نهائي', danger: true }))) return;
+    try { await rest(`listings?id=eq.${id}`, { method: 'DELETE' }); removeLocal(id); toast('تم الحذف'); refreshStats(); route(); } catch (err) { toast(errMsg(err), true); }
+  }
 });
 
 start();
