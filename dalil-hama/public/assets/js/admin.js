@@ -97,7 +97,7 @@ const rep = { Prefer: 'return=representation' };
 // ─────────────── الحالة ───────────────
 
 const A = {
-  me: null, listings: [], byId: new Map(), cats: [], catById: new Map(), areas: [], settings: {}, stats: null, reports: [], admins: [], inboxTab: 'req',
+  me: null, listings: [], byId: new Map(), cats: [], catById: new Map(), areas: [], settings: {}, stats: null, reports: [], admins: [], inboxTab: 'req', candTab: 'todo', candQ: '', pendLimit: {},
   index: new SearchIndex(), f: { q: '', cat: '', status: 'approved', flag: '', area: '', sort: 'new' }, selected: new Set(), page: 0, reportTab: 'open',
 };
 
@@ -540,53 +540,92 @@ function viewDash(el) {
 
 /** المرشح: رقم أضافته الإدارة أو استوردته للمراجعة (لم يطلب صاحبه الإضافة). الطلب: ما أرسله الزوار بأنفسهم. */
 const isCand = (r) => r.status === 'pending' && r.source !== 'public';
-const CONSENT_MSG = (name) => `السلام عليكم ورحمة الله،\nنحن فريق «دليل حماة — حماة بين يديك»، دليل إلكتروني مجاني لأهل المدينة.\nيسعدنا إدراج «${name}» (الاسم والتصنيف والرقم فقط) في الدليل، ولن نضيفه إلا بموافقتكم.\n✅ للموافقة أرسلوا كلمة «موافق».\n❌ وإن لم ترغبوا فلا حاجة للرد، ولن يُنشر شيء.\nشاكرين لكم 🌿`;
+const CONSENT_MSG = (name) => `السلام عليكم ورحمة الله،\nنحن فريق «دليل حماة — حماة بين يديك»، دليل إلكتروني مجاني لأهل المدينة.\nيسعدنا إدراج «${name}» (الاسم والتصنيف والرقم فقط) في الدليل، ولن نضيفه إلا بموافقتكم.\n✅ للموافقة أرسلوا كلمة «موافق».\n❌ وإن لم ترغبوا فلا حاجة للرد، ولن يُنشر شيء.\nويمكنكم طلب التعديل أو الحذف في أي وقت.\nالموقع: https://dalil-hama.majid.cfd\nشاكرين لكم 🌿`;
+
+const SENT = '📨';
+const isSent = (r) => (r.admin_note || '').includes(SENT);
+const PEND_PAGE = 40;
 
 function viewPending(el, mode = 'req') {
   const cand = mode === 'cand';
-  const rows = A.listings.filter((r) => r.status === 'pending' && cand === isCand(r)).sort((a, b) => b.id - a.id);
-  if (!rows.length) {
+  const all = A.listings.filter((r) => r.status === 'pending' && cand === isCand(r)).sort((a, b) => b.id - a.id);
+  if (!all.length) {
     el.innerHTML = cand
       ? `<div class="empty"><div class="big">📋</div><h3>لا يوجد مرشحون</h3><p>الأرقام التي تستوردها «كمرشحين» تظهر هنا للتواصل مع أصحابها قبل النشر. استخدمها من «استيراد وتصدير».</p></div>`
       : `<div class="empty"><div class="big">🎉</div><h3>لا توجد طلبات معلّقة</h3><p>كل طلبات الإضافة تمت مراجعتها.</p></div>`;
     return;
   }
-  el.innerHTML = rows.map((r) => {
-    const dupIds = A.listings.filter((x) => x.id !== r.id && x.status === 'approved' && (x.phones || []).some((p) => (r.phones || []).includes(p)));
-    const mob = (r.phones || []).find(isMobile);
-    return `<div class="req" data-id="${r.id}">
+  const n = { todo: all.filter((r) => !isSent(r)).length, sent: all.filter(isSent).length, all: all.length };
+  el.innerHTML = `${cand ? `<div class="toolbar"><div class="seg-tabs">${[['todo', 'لم يُراسَل'], ['sent', 'بانتظار الرد'], ['all', 'الكل']]
+    .map(([k, l]) => `<button type="button" data-ctab="${k}" aria-pressed="${A.candTab === k}">${l} (${fmtNum(n[k])})</button>`).join('')}</div>
+    <input class="input grow" id="cand-q" type="search" placeholder="ابحث بالاسم أو جزء من الرقم…" value="${esc(A.candQ)}"></div>` : ''}<div id="pend-list"></div>`;
+  // فهرس الأرقام المنشورة مرة واحدة بدل مسح كل الأنشطة لكل بطاقة
+  const byPhone = new Map();
+  for (const x of A.listings) if (x.status === 'approved') for (const p of x.phones || []) { if (!byPhone.has(p)) byPhone.set(p, []); byPhone.get(p).push(x); }
+  const draw = () => {
+    let rows = all;
+    if (cand) {
+      const q = normalize(A.candQ);
+      const qd = A.candQ.replace(/\D/g, '');
+      rows = rows.filter((r) => (A.candTab === 'all' || (A.candTab === 'sent') === isSent(r))
+        && (!q || normalize(r.name).includes(q) || (qd.length >= 3 && (r.phones || []).some((p) => p.includes(qd)))));
+    }
+    const lim = A.pendLimit[mode] || PEND_PAGE;
+    $('#pend-list', el).innerHTML = (rows.slice(0, lim).map((r) => {
+      const dupIds = [...new Set((r.phones || []).flatMap((p) => byPhone.get(p) || []))].filter((x) => x.id !== r.id);
+      const mob = (r.phones || []).find(isMobile);
+      return `<div class="req" data-id="${r.id}">
       <div class="req-head"><span class="avatar" style="--hue:${catHue(r.category_id)}">${catIcon(r.category_id)}</span>
-        <div style="flex:1;min-width:0"><h3>${esc(r.name)}</h3><div class="muted" style="font-size:13px">${esc(catName(r.category_id))} · ${timeAgo(r.created_at)} · #${r.id}</div></div>${st(r.status)}</div>
+        <div style="flex:1;min-width:0"><h3>${esc(r.name)}</h3><div class="muted" style="font-size:13px">${esc(catName(r.category_id))} · ${timeAgo(r.created_at)} · #${r.id}</div></div>${cand && isSent(r) ? '<span class="st hidden">بانتظار الرد</span>' : st(r.status)}</div>
       <dl class="kv">
         <dt>الأرقام</dt><dd>${phonesHtml(r)}</dd>
         ${r.area || r.address ? `<dt>العنوان</dt><dd>${esc([r.area, r.address].filter(Boolean).join('، '))}</dd>` : ''}
         ${safeUrl(r.map_url) ? `<dt>الخريطة</dt><dd><a href="${esc(safeUrl(r.map_url))}" target="_blank" rel="noopener" style="color:var(--brand)">فتح الرابط</a></dd>` : ''}
         ${r.website ? `<dt>الموقع</dt><dd dir="ltr" style="text-align:right">${esc(r.website)}</dd>` : ''}
         ${r.description ? `<dt>النبذة</dt><dd>${esc(r.description)}</dd>` : ''}
-        ${cand ? `<dt>الحالة</dt><dd>مرشّح — لا تنشره قبل موافقة صاحب الرقم</dd>` : ''}
         ${r.submitter_name || r.submitter_phone ? `<dt>المُرسِل</dt><dd>${esc(r.submitter_name || '')} ${r.submitter_phone ? `<bdi dir="ltr">${esc(r.submitter_phone)}</bdi>` : ''}</dd>` : ''}
+        ${r.admin_note ? `<dt>ملاحظات</dt><dd style="white-space:pre-wrap">${esc(r.admin_note)}</dd>` : ''}
       </dl>
       ${dupIds.length ? `<div class="warnbox">${I('alert', 'sm')}الرقم موجود مسبقاً في: ${dupIds.map((d) => `<a href="#" data-edit="${d.id}" style="font-weight:700">${esc(d.name)}</a>`).join('، ')}</div>` : ''}
       <div class="ops">
         <button class="btn btn-primary" data-approve="${r.id}">${I('check', 'sm')}${cand ? 'وافق — انشر' : 'قبول ونشر'}</button>
-        <button class="btn btn-soft" data-edit="${r.id}">${I('edit', 'sm')}مراجعة وتعديل</button>
         ${mob ? `<a class="btn btn-wa" href="${waHref(mob, cand ? CONSENT_MSG(r.name) : `مرحباً، وصلنا طلب إضافة «${r.name}» إلى دليل حماة. نود التأكد من صحة البيانات قبل النشر 🌿`)}" target="_blank" rel="noopener">${I('wa', 'sm')}${cand ? 'طلب الموافقة واتساب' : 'تحقق عبر واتساب'}</a>` : ''}
         ${r.phones && r.phones[0] ? `<a class="btn btn-soft" href="${telHref(r.phones[0])}">${I('phone', 'sm')}اتصال</a>` : ''}
-        <button class="btn btn-danger" data-reject="${r.id}">${I('x', 'sm')}رفض</button>
+        ${cand ? `<button class="btn btn-soft" data-sent="${r.id}">${isSent(r) ? 'إلغاء «أُرسلت»' : `${SENT} أرسلتُ الرسالة`}</button>` : ''}
+        <button class="btn btn-soft" data-edit="${r.id}">${I('edit', 'sm')}تعديل</button>
+        <button class="btn btn-danger" data-reject="${r.id}">${I('x', 'sm')}${cand ? 'استبعاد' : 'رفض'}</button>
       </div></div>`;
-  }).join('');
+    }).join('') || '<div class="empty"><p>لا شيء هنا.</p></div>')
+      + (rows.length > lim ? `<button class="btn btn-soft btn-block mt" type="button" data-more>عرض المزيد (${fmtNum(rows.length - lim)} متبقٍ)</button>` : '');
+  };
+  draw();
+  const q = $('#cand-q', el);
+  if (q) q.addEventListener('input', debounce(() => { A.candQ = q.value; A.pendLimit[mode] = PEND_PAGE; draw(); }, 200));
+  // إعادة الرسم بعد كل إجراء مع تحديث العدّادات (وتبويبات «الطلبات والبلاغات» إن كنا داخلها)
+  const again = () => { renderNavCounts(); if (el.id === 'inbox-box') viewInbox($('#content')); else viewPending(el, mode); };
   el.onclick = async (e) => {
+    const tab = e.target.closest('[data-ctab]');
+    if (tab) { A.candTab = tab.dataset.ctab; A.pendLimit[mode] = PEND_PAGE; viewPending(el, mode); return; }
+    if (e.target.closest('[data-more]')) { A.pendLimit[mode] = (A.pendLimit[mode] || PEND_PAGE) + PEND_PAGE; draw(); return; }
+    const ms = e.target.closest('[data-sent]');
     const ap = e.target.closest('[data-approve]');
     const rj = e.target.closest('[data-reject]');
-    if (!ap && !rj) return;
-    const id = Number((ap || rj).dataset.approve || (ap || rj).dataset.reject);
+    if (!ms && !ap && !rj) return;
+    const id = Number((ms || ap || rj).dataset.sent || (ms || ap || rj).dataset.approve || (ms || ap || rj).dataset.reject);
+    const r = A.byId.get(id);
+    if (!r) return;
     try {
-      const [row] = await rest(`listings?id=eq.${id}`, { method: 'PATCH', body: { status: ap ? 'approved' : 'rejected' }, headers: rep });
+      let body;
+      if (ms) {
+        const note = r.admin_note || '';
+        body = { admin_note: (isSent(r) ? note.split('\n').filter((l) => !l.includes(SENT)).join('\n').trim()
+          : `${note ? `${note}\n` : ''}${SENT} أُرسلت رسالة الموافقة ${new Date().toISOString().slice(0, 10)}`) || null };
+      } else body = { status: ap ? 'approved' : 'rejected' };
+      const [row] = await rest(`listings?id=eq.${id}`, { method: 'PATCH', body, headers: rep });
       upsertLocal(row);
-      toast(ap ? 'تم النشر ✓' : 'تم الرفض');
-      refreshStats();
-      renderNavCounts();
-      viewPending(el, mode);
+      toast(ms ? (isSent(row) ? 'سُجّل: أُرسلت الرسالة ✓' : 'أُلغيت علامة الإرسال') : ap ? 'تم النشر ✓' : (cand ? 'تم الاستبعاد' : 'تم الرفض'));
+      if (!ms) refreshStats();
+      again();
     } catch (err) { toast(errMsg(err), true); }
   };
 }
@@ -594,7 +633,8 @@ function viewPending(el, mode = 'req') {
 // ─────────────── المرشحون ───────────────
 
 function viewCands(el) {
-  el.innerHTML = `<div class="warnbox" style="margin-bottom:12px">${I('info', 'sm')}المرشحون أرقام للمراجعة فقط، لا تظهر في الدليل. تواصل مع صاحب الرقم (اتصال أو رسالة الموافقة)، وبعد موافقته اضغط «وافق — انشر».</div><div id="cand-box"></div>`;
+  A.candQ = ''; // كل فتح جديد للشاشة يبدأ دون بحث سابق
+  el.innerHTML = `<div class="warnbox" style="margin-bottom:12px">${I('info', 'sm')}المرشحون أرقام للمراجعة فقط، لا تظهر في الدليل. أرسل رسالة الموافقة ثم اضغط «أرسلتُ الرسالة» لينتقل إلى «بانتظار الرد». وحين يرد صاحب الرقم ابحث عنه بجزء من رقمه، واضغط «وافق — انشر».</div><div id="cand-box"></div>`;
   viewPending($('#cand-box'), 'cand');
 }
 
@@ -1117,6 +1157,7 @@ const CSV_COLS = [
   ['الحي', (r) => r.area || ''], ['العنوان', (r) => r.address || ''], ['رابط الخريطة', (r) => r.map_url || ''], ['خط العرض', (r) => r.lat ?? ''], ['خط الطول', (r) => r.lng ?? ''],
   ['الموقع الإلكتروني', (r) => r.website || ''], ['نبذة', (r) => r.description || ''], ['وسوم', (r) => (r.tags || []).join('، ')], ['واتساب', (r) => r.whatsapp || ''],
   ['مميز', (r) => (r.featured ? 'نعم' : '')], ['موثق', (r) => (r.verified ? 'نعم' : '')], ['الحالة', (r) => r.status], ['تاريخ الإضافة', (r) => r.created_at.slice(0, 10)],
+  ['ملاحظة إدارية', (r) => r.admin_note || ''],
 ];
 
 function toCsv(rows) {
@@ -1208,6 +1249,10 @@ function viewIO(el) {
         const m = parseMap(`${o.map_url || ''} ${o.address || ''}`);
         if (m.lat !== null) { o.lat = +m.lat.toFixed(6); o.lng = +m.lng.toFixed(6); }
       }
+      // ملاحظة إدارية لا تظهر للزوار (مثل مصدر الرقم)، تُقرأ فقط إن وُجد عمودها حتى تتطابق مفاتيح الدفعة
+      if ('ملاحظة إدارية' in r || 'المصدر' in r) {
+        o.admin_note = [r['ملاحظة إدارية'], r['المصدر'] && `المصدر: ${r['المصدر']}`].filter(Boolean).join('\n').slice(0, 2000) || null;
+      }
       if (id) o.id = id;
       if (old) o._old = true;
       if (!catByName.has(normalize(r['التصنيف'] || '')) && id && A.byId.has(id)) delete o.category_id;
@@ -1215,14 +1260,19 @@ function viewIO(el) {
     }).filter((o) => o && o.name.length >= 2);
     const skipped = rows.filter((r) => 'الرقم' in r && A.byId.has(Number(r['المعرف']))).length;
     const updates = mapped.filter((o) => o.id && A.byId.has(o.id));
-    const inserts = mapped.filter((o) => !(o.id && A.byId.has(o.id)));
+    let inserts = mapped.filter((o) => !(o.id && A.byId.has(o.id)));
+    // الجديد الذي يحمل رقماً موجوداً مسبقاً (منشوراً أو معلّقاً أو مخفياً) يُتجاهل افتراضياً
+    const have = new Set(A.listings.filter((x) => x.status !== 'rejected').flatMap((x) => x.phones || []));
+    const dupIns = inserts.filter((o) => (o.phones || []).some((p) => have.has(p)));
     $('#import-preview').innerHTML = `<div class="warnbox mt">${I('info', 'sm')}الملف يحتوي ${fmtNum(mapped.length + skipped)} نشاطاً: ${fmtNum(updates.length)} للتحديث و${fmtNum(inserts.length)} جديد${skipped ? `، و${fmtNum(skipped)} موجود مسبقاً في الدليل سيُتجاهل (ملف الدليل القديم لا يُحدِّث البيانات المنظّفة)` : ''}.</div>
       <label class="toggles mt" style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="imp-cand"> استيرادهم كـ«مرشحين» للمراجعة (لا يُنشرون حتى توافق عليهم)</label>
+      ${dupIns.length ? `<label class="toggles mt" style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="imp-skipdup" checked> تجاهل ${fmtNum(dupIns.length)} جديداً رقمه موجود مسبقاً في الدليل</label>` : ''}
       <div class="toolbar mt"><button class="btn btn-primary" id="do-import">${I('upload', 'sm')}تنفيذ الاستيراد</button></div>`;
     $('#do-import').onclick = async (e) => {
       e.target.disabled = true;
       e.target.textContent = 'جارٍ الاستيراد…';
       try {
+        if ($('#imp-skipdup') && $('#imp-skipdup').checked) inserts = inserts.filter((o) => !dupIns.includes(o));
         if ($('#imp-cand') && $('#imp-cand').checked) inserts.forEach((o) => { o.status = 'pending'; o.source = 'import'; });
         const groups = new Map();
         for (const o of updates) {
