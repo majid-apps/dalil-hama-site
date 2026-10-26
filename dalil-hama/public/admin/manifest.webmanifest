@@ -1,0 +1,19 @@
+{
+  "id": "/admin/",
+  "name": "إدارة دليل حماة",
+  "short_name": "إدارة الدليل",
+  "description": "لوحة إدارة دليل حماة الخاصة",
+  "lang": "ar",
+  "dir": "rtl",
+  "start_url": "/admin/",
+  "scope": "/admin/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0a3a35",
+  "theme_color": "#0a3a35",
+  "icons": [
+    { "src": "/assets/img/admin-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/assets/img/admin-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/assets/img/admin-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

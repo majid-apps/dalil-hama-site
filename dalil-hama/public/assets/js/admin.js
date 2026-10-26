@@ -140,14 +140,13 @@ function indexListings() {
 }
 
 async function loadAll() {
-  const [listings, cats, areas, settings, stats, reports, admins] = await Promise.all([
+  const [listings, cats, areas, settings, stats, reports] = await Promise.all([
     fetchAllListings(),
     rest('categories?select=*&order=sort.asc,name.asc'),
     rest('areas?select=*&order=sort.asc,name.asc'),
     rest('settings?select=*'),
     rpc('admin_stats'),
     rest('reports?select=*&order=created_at.desc&limit=300'),
-    rest('admins?select=*&order=created_at.asc'),
   ]);
   A.listings = listings;
   A.cats = cats;
@@ -156,7 +155,6 @@ async function loadAll() {
   A.settings = Object.fromEntries(settings.map((s) => [s.key, s.value]));
   A.stats = stats;
   A.reports = reports;
-  A.admins = admins;
   indexListings();
 }
 
@@ -238,7 +236,7 @@ function renderShell() {
       <a class="brand" href="/"><span class="mark"><svg viewBox="0 0 64 64"><use href="${ICONS}#noria"/></svg></span><span>دليل حماة<small>لوحة الإدارة</small></span></a>
       <nav class="nav" id="nav">${VIEWS.map(([k, l, ic]) => (k === '-' ? '<div class="nav-sep"></div>' : `<a href="#${k}" data-view="${k}">${I(ic)}${l}<span class="n" data-count="${k}" hidden></span></a>`)).join('')}</nav>
       <div class="side-foot">
-        <div class="who">${I('user', 'sm')}<span style="overflow:hidden;text-overflow:ellipsis">${A.me.role === 'owner' ? 'مالك الدليل' : 'محرر'}</span></div>
+        <div class="who">${I('user', 'sm')}<span style="overflow:hidden;text-overflow:ellipsis">لوحتك الخاصة</span></div>
         <div style="display:flex;gap:6px">
           <a class="btn btn-soft" href="/" style="flex:1">${I('external', 'sm')}الدليل</a>
           <button class="btn btn-soft" type="button" id="theme-btn" aria-label="المظهر">${I('moon', 'sm')}</button>
@@ -318,6 +316,7 @@ window.addEventListener('hashchange', () => { if (A.me) { closeSheet(); route();
 
 async function start() {
   try { sessionStorage.removeItem('dh:preview'); } catch { /* ignore */ }
+  if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('/sw.js').catch(() => {});
   if (!auth.session) return renderLogin();
   try {
     A.me = await rpc('admin_me');
@@ -504,11 +503,21 @@ function viewDash(el) {
     return `<div class="col" data-tip="${day.slice(5)}: ${v.view || 0} مشاهدة · ${v.call || 0} اتصال · ${v.whatsapp || 0} واتساب"><div class="seg" style="height:${h(v.call || 0)};background:var(--brand)"></div><div class="seg" style="height:${h(v.whatsapp || 0)};background:var(--wa)"></div><div class="seg" style="height:${h(v.view || 0)};background:var(--gold-2);opacity:.55"></div></div>`;
   }).join('');
   const chartV = list.map(([day, v]) => `<div class="col" data-tip="${day.slice(5)}: ${v.visit || 0} زيارة · ${v.search || 0} بحث"><div class="seg" style="height:${((v.visit || 0) / maxV) * 100}%;background:var(--brand)"></div></div>`).join('');
+  const pend = A.listings.filter((r) => r.status === 'pending');
+  const t = { todo: pend.filter((r) => isCand(r) && !isSent(r)).length, sent: pend.filter((r) => isCand(r) && isSent(r)).length,
+    req: pend.filter((r) => !isCand(r)).length, rep: A.reports.filter((r) => r.status === 'open').length };
+  const task = (href, n, label, hint, ic) => `<a class="task${n ? ' on' : ''}" href="${href}">${I(ic)}<b>${fmtNum(n)}</b><span>${label}<small>${hint}</small></span></a>`;
   el.innerHTML = `
+    <div class="panel tasks-panel" style="margin-top:0"><h2>${I('check')}مهام اليوم</h2>
+      ${t.todo + t.sent + t.req + t.rep ? `<div class="tasks">
+        ${task('#cands?tab=todo', t.todo, 'مرشحون للمراسلة', 'أرسل لهم رسالة الموافقة', 'wa')}
+        ${task('#cands?tab=sent', t.sent, 'بانتظار ردّهم', 'انشر من وافق منهم', 'clock')}
+        ${task('#inbox?tab=req', t.req, 'طلبات انضمام', 'راجعها وانشرها', 'inbox')}
+        ${task('#inbox?tab=rep', t.rep, 'بلاغات', 'صحّح أو أخفِ', 'flag')}
+      </div>` : '<p class="muted" style="margin:0">لا شيء ينتظرك الآن 🎉</p>'}</div>
     <div class="quick-links">
       <a class="btn btn-primary" href="/">${I('external', 'sm')}فتح الدليل العام</a>
       <a class="btn btn-gold" href="#new">${I('plus', 'sm')}نشاط جديد</a>
-      <a class="btn btn-soft" href="#inbox">${I('inbox', 'sm')}الطلبات والبلاغات</a>
     </div>
     <div class="more-links">
       <a href="#quality">${I('check')}جودة البيانات</a><a href="#cats">${I('grid')}التصنيفات</a><a href="#areas">${I('pin')}الأحياء</a>
@@ -546,6 +555,43 @@ const SENT = '📨';
 const isSent = (r) => (r.admin_note || '').includes(SENT);
 const PEND_PAGE = 40;
 
+/** ضمّ أرقام مرشح إلى بطاقة منشورة (يكمل الناقص فيها) ثم حذف المرشح. بلا targetId: نافذة بحث لاختيار البطاقة */
+function attachCand(candId, targetId, done) {
+  const c = A.byId.get(candId);
+  if (!c) return;
+  const run = async (tid) => {
+    const t = A.byId.get(tid);
+    if (!t) return;
+    const add = (c.phones || []).filter((p) => !(t.phones || []).includes(p));
+    if (!(await confirmBox(`ضمّ ${add.length ? `الرقم <b dir="ltr">${esc(add.join(' / '))}</b>` : 'معلومات'} «${esc(c.name)}» إلى البطاقة المنشورة «${esc(t.name)}»؟ سيظهر للزوار، ويُحذف المرشح.`, { ok: 'ضمّ' }))) return;
+    try {
+      const [row] = await rest(`listings?id=eq.${t.id}`, { method: 'PATCH', headers: rep, body: {
+        phones: [...new Set([...(t.phones || []), ...(c.phones || [])])],
+        area: t.area || c.area, address: t.address || c.address, map_url: t.map_url || c.map_url,
+        lat: t.lat ?? c.lat, lng: t.lng ?? c.lng, website: t.website || c.website,
+      } });
+      await rest(`listings?id=eq.${c.id}`, { method: 'DELETE' });
+      removeLocal(c.id);
+      upsertLocal(row);
+      closeSheet();
+      toast('تم الضمّ ✓');
+      refreshStats();
+      if (done) done(); else route();
+    } catch (err) { toast(errMsg(err), true); }
+  };
+  if (targetId) { run(targetId); return; }
+  const sh = openSheet('ضمّ إلى بطاقة موجودة', `<p style="margin-top:0">اختر البطاقة المنشورة التي يتبع لها «<b>${esc(c.name)}</b>»، فتُضاف أرقامه إليها ويُحذف المرشح.</p>
+    <input class="input" id="a-q" autocomplete="off" value="${esc(c.name)}"><div class="pick-list" id="a-list"></div>`);
+  const draw = () => {
+    const q = sh.querySelector('#a-q').value.trim();
+    const res = (q ? A.index.search(q).results.map((x) => x._row) : []).filter((x) => x.status === 'approved' && x.id !== c.id).slice(0, 12);
+    sh.querySelector('#a-list').innerHTML = res.map((x) => `<button type="button" data-t="${x.id}">${esc(x.name)} <small>#${x.id} · ${esc(catName(x.category_id))} · ${(x.phones || []).join(' / ') || 'بلا رقم'}</small></button>`).join('') || '<p class="muted">لا نتائج. جرّب جزءاً من الاسم.</p>';
+  };
+  sh.querySelector('#a-q').addEventListener('input', debounce(draw, 150));
+  draw();
+  sh.querySelector('#a-list').onclick = (e) => { const b = e.target.closest('[data-t]'); if (b) run(Number(b.dataset.t)); };
+}
+
 function viewPending(el, mode = 'req') {
   const cand = mode === 'cand';
   const all = A.listings.filter((r) => r.status === 'pending' && cand === isCand(r)).sort((a, b) => b.id - a.id);
@@ -574,6 +620,9 @@ function viewPending(el, mode = 'req') {
     $('#pend-list', el).innerHTML = (rows.slice(0, lim).map((r) => {
       const dupIds = [...new Set((r.phones || []).flatMap((p) => byPhone.get(p) || []))].filter((x) => x.id !== r.id);
       const mob = (r.phones || []).find(isMobile);
+      // بطاقات منشورة تذكرها الملاحظة (#رقم): الأرجح أن الرقم إضافي لها فيُضمّ إليها بضغطة
+      const targets = cand ? [...new Set([...(r.admin_note || '').matchAll(/#(\d+)/g)].map((m) => Number(m[1])))]
+        .map((id) => A.byId.get(id)).filter((x) => x && x.status === 'approved' && x.id !== r.id).slice(0, 2) : [];
       return `<div class="req" data-id="${r.id}">
       <div class="req-head"><span class="avatar" style="--hue:${catHue(r.category_id)}">${catIcon(r.category_id)}</span>
         <div style="flex:1;min-width:0"><h3>${esc(r.name)}</h3><div class="muted" style="font-size:13px">${esc(catName(r.category_id))} · ${timeAgo(r.created_at)} · #${r.id}</div></div>${cand && isSent(r) ? '<span class="st hidden">بانتظار الرد</span>' : st(r.status)}</div>
@@ -589,9 +638,12 @@ function viewPending(el, mode = 'req') {
       ${dupIds.length ? `<div class="warnbox">${I('alert', 'sm')}الرقم موجود مسبقاً في: ${dupIds.map((d) => `<a href="#" data-edit="${d.id}" style="font-weight:700">${esc(d.name)}</a>`).join('، ')}</div>` : ''}
       <div class="ops">
         <button class="btn btn-primary" data-approve="${r.id}">${I('check', 'sm')}${cand ? 'وافق — انشر' : 'قبول ونشر'}</button>
-        ${mob ? `<a class="btn btn-wa" href="${waHref(mob, cand ? CONSENT_MSG(r.name) : `مرحباً، وصلنا طلب إضافة «${r.name}» إلى دليل حماة. نود التأكد من صحة البيانات قبل النشر 🌿`)}" target="_blank" rel="noopener">${I('wa', 'sm')}${cand ? 'طلب الموافقة واتساب' : 'تحقق عبر واتساب'}</a>` : ''}
+        ${mob ? `<a class="btn btn-wa" href="${waHref(mob, cand ? CONSENT_MSG(r.name) : `مرحباً، وصلنا طلب إضافة «${r.name}» إلى دليل حماة. نود التأكد من صحة البيانات قبل النشر 🌿`)}" target="_blank" rel="noopener"${cand && !isSent(r) ? ` data-wa-sent="${r.id}"` : ''}>${I('wa', 'sm')}${cand ? 'رسالة الموافقة' : 'تحقق عبر واتساب'}</a>` : ''}
         ${r.phones && r.phones[0] ? `<a class="btn btn-soft" href="${telHref(r.phones[0])}">${I('phone', 'sm')}اتصال</a>` : ''}
-        ${cand ? `<button class="btn btn-soft" data-sent="${r.id}">${isSent(r) ? 'إلغاء «أُرسلت»' : `${SENT} أرسلتُ الرسالة`}</button>` : ''}
+        ${cand && isSent(r) ? `<button class="btn btn-soft" data-sent="${r.id}">إلغاء «أُرسلت»</button>` : ''}
+        ${cand && !isSent(r) && !mob ? `<button class="btn btn-soft" data-sent="${r.id}">${SENT} تواصلتُ معه</button>` : ''}
+        ${targets.map((x) => `<button class="btn btn-soft" data-attach="${r.id}" data-to="${x.id}">${I('merge', 'sm')}ضمّ إلى «${esc(x.name.slice(0, 28))}»</button>`).join('')}
+        ${cand && !targets.length ? `<button class="btn btn-soft" data-attach="${r.id}">${I('merge', 'sm')}ضمّ لبطاقة موجودة</button>` : ''}
         <button class="btn btn-soft" data-edit="${r.id}">${I('edit', 'sm')}تعديل</button>
         <button class="btn btn-danger" data-reject="${r.id}">${I('x', 'sm')}${cand ? 'استبعاد' : 'رفض'}</button>
       </div></div>`;
@@ -607,6 +659,19 @@ function viewPending(el, mode = 'req') {
     const tab = e.target.closest('[data-ctab]');
     if (tab) { A.candTab = tab.dataset.ctab; A.pendLimit[mode] = PEND_PAGE; viewPending(el, mode); return; }
     if (e.target.closest('[data-more]')) { A.pendLimit[mode] = (A.pendLimit[mode] || PEND_PAGE) + PEND_PAGE; draw(); return; }
+    const at = e.target.closest('[data-attach]');
+    if (at) { attachCand(Number(at.dataset.attach), at.dataset.to ? Number(at.dataset.to) : null, again); return; }
+    const wa = e.target.closest('[data-wa-sent]');
+    if (wa) {
+      // يفتح واتساب برسالة الموافقة، ويُسجَّل «أُرسلت» في الخلفية (التراجع من تبويب «بانتظار الرد»)
+      const r0 = A.byId.get(Number(wa.dataset.waSent));
+      if (!r0 || isSent(r0)) return;
+      const note = `${r0.admin_note ? `${r0.admin_note}\n` : ''}${SENT} طُلبت الموافقة ${new Date().toISOString().slice(0, 10)}`;
+      rest(`listings?id=eq.${r0.id}`, { method: 'PATCH', body: { admin_note: note }, headers: rep, keepalive: true })
+        .then(([row]) => { upsertLocal(row); toast('سُجّلت «أُرسلت» ✓ — التراجع من «بانتظار الرد»'); again(); })
+        .catch((err) => toast(errMsg(err), true));
+      return;
+    }
     const ms = e.target.closest('[data-sent]');
     const ap = e.target.closest('[data-approve]');
     const rj = e.target.closest('[data-reject]');
@@ -619,11 +684,11 @@ function viewPending(el, mode = 'req') {
       if (ms) {
         const note = r.admin_note || '';
         body = { admin_note: (isSent(r) ? note.split('\n').filter((l) => !l.includes(SENT)).join('\n').trim()
-          : `${note ? `${note}\n` : ''}${SENT} أُرسلت رسالة الموافقة ${new Date().toISOString().slice(0, 10)}`) || null };
+          : `${note ? `${note}\n` : ''}${SENT} طُلبت الموافقة ${new Date().toISOString().slice(0, 10)}`) || null };
       } else body = { status: ap ? 'approved' : 'rejected' };
       const [row] = await rest(`listings?id=eq.${id}`, { method: 'PATCH', body, headers: rep });
       upsertLocal(row);
-      toast(ms ? (isSent(row) ? 'سُجّل: أُرسلت الرسالة ✓' : 'أُلغيت علامة الإرسال') : ap ? 'تم النشر ✓' : (cand ? 'تم الاستبعاد' : 'تم الرفض'));
+      toast(ms ? (isSent(row) ? 'سُجّل التواصل ✓ — انتقل إلى «بانتظار الرد»' : 'أُلغيت علامة التواصل') : ap ? 'تم النشر ✓' : (cand ? 'تم الاستبعاد' : 'تم الرفض'));
       if (!ms) refreshStats();
       again();
     } catch (err) { toast(errMsg(err), true); }
@@ -632,8 +697,11 @@ function viewPending(el, mode = 'req') {
 
 // ─────────────── المرشحون ───────────────
 
+function hashParam(k) { return new URLSearchParams(location.hash.split('?')[1] || '').get(k); }
+
 function viewCands(el) {
   A.candQ = ''; // كل فتح جديد للشاشة يبدأ دون بحث سابق
+  if (['todo', 'sent', 'all'].includes(hashParam('tab'))) A.candTab = hashParam('tab');
   el.innerHTML = `<div class="warnbox" style="margin-bottom:12px">${I('info', 'sm')}المرشحون أرقام للمراجعة فقط، لا تظهر في الدليل. أرسل رسالة الموافقة ثم اضغط «أرسلتُ الرسالة» لينتقل إلى «بانتظار الرد». وحين يرد صاحب الرقم ابحث عنه بجزء من رقمه، واضغط «وافق — انشر».</div><div id="cand-box"></div>`;
   viewPending($('#cand-box'), 'cand');
 }
@@ -641,6 +709,7 @@ function viewCands(el) {
 // ─────────────── الطلبات والبلاغات ───────────────
 
 function viewInbox(el) {
+  if (['req', 'rep'].includes(hashParam('tab'))) { A.inboxTab = hashParam('tab'); history.replaceState(null, '', '#inbox'); }
   const reqs = A.listings.filter((r) => r.status === 'pending' && !isCand(r)).length;
   const reps = A.reports.filter((r) => r.status === 'open').length;
   const tab = A.inboxTab;
@@ -938,7 +1007,7 @@ function auditVal(v) {
   return String(v);
 }
 function auditItem(l) {
-  const who = (A.admins.find((a) => a.user_id === l.user_id) || {}).email || 'النظام';
+  const who = l.user_id ? 'أنت' : 'النظام'; // الإدارة لمستخدم واحد
   const act = { create: 'أضاف', update: 'عدّل', delete: 'حذف', import: 'استورد' }[l.action] || l.action;
   let chg = '';
   if (l.action === 'update' && l.changes) {
@@ -971,9 +1040,11 @@ function mergeDialog(keepId) {
   sh.querySelector('#m-list').onclick = async (e) => {
     const b = e.target.closest('[data-m]');
     if (!b) return;
-    const drop = A.byId.get(Number(b.dataset.m));
-    const keep = A.byId.get(keepId); // الصف الحالي، لا النسخة الملتقطة عند فتح النافذة
+    let drop = A.byId.get(Number(b.dataset.m));
+    let keep = A.byId.get(keepId); // الصف الحالي، لا النسخة الملتقطة عند فتح النافذة
     if (!drop || !keep) { draw(); return; }
+    // دمج مرشح/طلب في بطاقة منشورة يُبقي المنشورة دائماً حتى لا تختفي من الدليل
+    if (keep.status !== 'approved' && drop.status === 'approved') [keep, drop] = [drop, keep];
     if (!(await confirmBox(`دمج «${esc(drop.name)}» في «${esc(keep.name)}» ثم حذفه؟`, { ok: 'دمج' }))) return;
     try {
       const body = {
@@ -987,8 +1058,8 @@ function mergeDialog(keepId) {
         description: keep.description || drop.description,
         tags: [...new Set([...(keep.tags || []), ...(drop.tags || [])])],
       };
-      const [row] = await rest(`listings?id=eq.${keepId}`, { method: 'PATCH', body, headers: rep });
-      await rest(`reports?listing_id=eq.${drop.id}`, { method: 'PATCH', body: { listing_id: keepId } });
+      const [row] = await rest(`listings?id=eq.${keep.id}`, { method: 'PATCH', body, headers: rep });
+      await rest(`reports?listing_id=eq.${drop.id}`, { method: 'PATCH', body: { listing_id: keep.id } });
       await rest(`listings?id=eq.${drop.id}`, { method: 'DELETE' });
       removeLocal(drop.id);
       upsertLocal(row);
@@ -1265,7 +1336,7 @@ function viewIO(el) {
     const have = new Set(A.listings.filter((x) => x.status !== 'rejected').flatMap((x) => x.phones || []));
     const dupIns = inserts.filter((o) => (o.phones || []).some((p) => have.has(p)));
     $('#import-preview').innerHTML = `<div class="warnbox mt">${I('info', 'sm')}الملف يحتوي ${fmtNum(mapped.length + skipped)} نشاطاً: ${fmtNum(updates.length)} للتحديث و${fmtNum(inserts.length)} جديد${skipped ? `، و${fmtNum(skipped)} موجود مسبقاً في الدليل سيُتجاهل (ملف الدليل القديم لا يُحدِّث البيانات المنظّفة)` : ''}.</div>
-      <label class="toggles mt" style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="imp-cand"> استيرادهم كـ«مرشحين» للمراجعة (لا يُنشرون حتى توافق عليهم)</label>
+      <label class="toggles mt" style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="imp-cand"${rows.some((r) => 'الحالة' in r) ? '' : ' checked'}> استيرادهم كـ«مرشحين» للمراجعة (لا يُنشرون حتى توافق عليهم)</label>
       ${dupIns.length ? `<label class="toggles mt" style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="imp-skipdup" checked> تجاهل ${fmtNum(dupIns.length)} جديداً رقمه موجود مسبقاً في الدليل</label>` : ''}
       <div class="toolbar mt"><button class="btn btn-primary" id="do-import">${I('upload', 'sm')}تنفيذ الاستيراد</button></div>`;
     $('#do-import').onclick = async (e) => {
@@ -1346,14 +1417,8 @@ function viewSettings(el) {
         <label class="field"><span>إنستغرام (اسم المستخدم)</span><input class="input" name="instagram" dir="ltr" value="${esc(c.instagram || '')}"></label>
         <label class="field full"><span>فيسبوك (رابط)</span><input class="input" name="facebook" dir="ltr" value="${esc(c.facebook || '')}"></label>
         <div class="full"><button class="btn btn-primary" ${owner ? '' : 'disabled'}>حفظ</button></div></form></div>
-    <div class="panel"><h2>${I('user')}فريق الإدارة</h2>
-      <ul class="rank">${A.admins.map((a) => `<li><span class="grow" dir="ltr" style="text-align:right">${esc(a.email)}</span><span class="st ${a.role === 'owner' ? 'approved' : 'hidden'}">${a.role === 'owner' ? 'مالك' : 'محرر'}</span>${owner && a.user_id !== A.me.user_id && a.email !== A.me.email ? `<button class="icon-btn" data-rm-admin="${a.user_id}" aria-label="إزالة">${I('trash', 'sm')}</button>` : ''}</li>`).join('')}</ul>
-      ${owner ? `<form class="form-grid two mt" id="s-admin"><label class="field"><span>بريد المشرف الجديد</span><input class="input" name="email" type="email" dir="ltr" required></label>
-        <label class="field"><span>كلمة مرور مؤقتة (10 أحرف على الأقل)</span><input class="input" name="password" dir="ltr" minlength="10" required></label>
-        <label class="field"><span>الصلاحية</span><select class="input" name="role"><option value="editor">محرر (الأنشطة والبلاغات)</option><option value="owner">مالك (كل الصلاحيات)</option></select></label>
-        <div class="field" style="align-self:end"><button class="btn btn-primary">${I('plus', 'sm')}إضافة مشرف</button></div></form>` : ''}</div>
     <div class="panel"><h2>${I('settings')}تغيير كلمة المرور</h2>
-      <form class="form-grid two" id="s-pw"><label class="field"><span>كلمة المرور الجديدة</span><input class="input" name="password" type="password" dir="ltr" minlength="10" required autocomplete="new-password"></label>
+      <form class="form-grid two" id="s-pw"><label class="field"><span>كلمة المرور الجديدة (10 أحرف على الأقل)</span><input class="input" name="password" type="password" dir="ltr" minlength="10" required autocomplete="new-password"></label>
         <div class="field" style="align-self:end"><button class="btn btn-primary">تحديث</button></div></form></div>`;
   const saveSetting = async (key, value) => {
     try {
@@ -1370,29 +1435,6 @@ function viewSettings(el) {
     e.preventDefault();
     const list = $$('#em-rows .ph').map((r) => ({ icon: r.querySelector('[name=icon]').value.trim(), name: r.querySelector('[name=name]').value.trim(), number: r.querySelector('[name=number]').value.trim() })).filter((x) => x.name && x.number);
     saveSetting('emergency', list);
-  };
-  if ($('#s-admin')) {
-    $('#s-admin').onsubmit = async (e) => {
-      e.preventDefault();
-      const fd = new FormData(e.target);
-      try {
-        await rpc('admin_create_user', { p_email: fd.get('email'), p_password: fd.get('password'), p_role: fd.get('role') });
-        A.admins = await rest('admins?select=*&order=created_at.asc');
-        toast('تمت إضافة المشرف ✓ — أرسل له البريد وكلمة المرور');
-        viewSettings(el);
-      } catch (err) { toast(/weak/.test(err.message) ? 'كلمة المرور قصيرة' : errMsg(err), true); }
-    };
-  }
-  el.onclick = async (e) => {
-    const b = e.target.closest('[data-rm-admin]');
-    if (!b) return;
-    if (!(await confirmBox('إزالة صلاحية الإدارة من هذا الحساب؟', { ok: 'إزالة', danger: true }))) return;
-    try {
-      await rest(`admins?user_id=eq.${b.dataset.rmAdmin}`, { method: 'DELETE' });
-      A.admins = A.admins.filter((a) => a.user_id !== b.dataset.rmAdmin);
-      toast('تمت الإزالة');
-      viewSettings(el);
-    } catch (err) { toast(errMsg(err), true); }
   };
   $('#s-pw').onsubmit = async (e) => {
     e.preventDefault();
