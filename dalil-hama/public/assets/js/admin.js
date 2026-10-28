@@ -68,7 +68,7 @@ const auth = {
 };
 
 function sessionExpired() {
-  auth.clear();
+  dropSession();
   renderLogin('انتهت الجلسة، سجّل الدخول مجدداً.');
 }
 
@@ -140,6 +140,42 @@ function indexListings() {
   A.index.setData(A.listings.map(compact), A.cats.map((c) => ({ i: c.id, n: c.name, k: c.keywords, o: c.sort })), A.areas.map((a) => ({ n: a.name })));
 }
 
+// نسخة مؤقتة على الجهاز (IndexedDB): تُعرض فور الفتح ثم تُحدَّث من الخادم في الخلفية. تُمحى عند الخروج.
+const cache = {
+  open: () => new Promise((ok, no) => {
+    const q = indexedDB.open('dh-admin', 1);
+    q.onupgradeneeded = () => q.result.createObjectStore('kv');
+    q.onsuccess = () => ok(q.result);
+    q.onerror = () => no(q.error);
+  }),
+  async run(mode, fn) {
+    try {
+      const db = await cache.open();
+      return await new Promise((ok) => {
+        const tx = db.transaction('kv', mode);
+        const r = fn(tx.objectStore('kv'));
+        tx.oncomplete = () => { db.close(); ok(r && r.result); };
+        tx.onerror = tx.onabort = () => { db.close(); ok(null); };
+      });
+    } catch { return null; }
+  },
+  read: () => cache.run('readonly', (st) => st.get('data')),
+  save: () => A.me && cache.run('readwrite', (st) => st.put({ listings: A.listings, cats: A.cats, areas: A.areas, settings: A.settings, stats: A.stats, reports: A.reports, me: A.me }, 'data')),
+  clear: () => cache.run('readwrite', (st) => st.delete('data')),
+};
+function dropSession() { auth.clear(); cache.clear(); }
+
+function applyData(d) {
+  A.listings = d.listings;
+  A.cats = d.cats;
+  A.catById = new Map(d.cats.map((c) => [c.id, c]));
+  A.areas = d.areas;
+  A.settings = d.settings;
+  A.stats = d.stats;
+  A.reports = d.reports;
+  indexListings();
+}
+
 async function loadAll() {
   const [listings, cats, areas, settings, stats, reports] = await Promise.all([
     fetchAllListings(),
@@ -149,14 +185,7 @@ async function loadAll() {
     rpc('admin_stats'),
     rest('reports?select=*&order=created_at.desc&limit=300'),
   ]);
-  A.listings = listings;
-  A.cats = cats;
-  A.catById = new Map(cats.map((c) => [c.id, c]));
-  A.areas = areas;
-  A.settings = Object.fromEntries(settings.map((s) => [s.key, s.value]));
-  A.stats = stats;
-  A.reports = reports;
-  indexListings();
+  applyData({ listings, cats, areas, settings: Object.fromEntries(settings.map((s) => [s.key, s.value])), stats, reports });
 }
 
 async function refreshStats() {
@@ -203,7 +232,7 @@ function renderLogin(msg = '') {
       await auth.login(fd.get('password'));
       await start();
     } catch (err) {
-      auth.clear();
+      dropSession();
       btn.disabled = false;
       btn.textContent = 'دخول';
       const box = $('.form-error');
@@ -271,7 +300,7 @@ function renderShell() {
   $('#nav').addEventListener('click', closeMenu);
   $('#logout').addEventListener('click', async () => {
     try { await api('/auth/v1/logout', { method: 'POST' }); } catch { /* ignore */ }
-    auth.clear();
+    dropSession();
     renderLogin();
   });
   $('#theme-btn').addEventListener('click', () => {
@@ -328,15 +357,36 @@ async function start() {
   try { sessionStorage.removeItem('dh:preview'); } catch { /* ignore */ }
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('/sw.js').catch(() => {});
   if (!auth.session) return renderLogin();
-  try {
+  // فتح فوري من النسخة المؤقتة إن وُجدت، والتحديث من الخادم يجري في الخلفية
+  const cached = await cache.read();
+  const fresh = (async () => {
     A.me = await rpc('admin_me');
-    if (!A.me) { auth.clear(); return renderLogin('هذا الحساب لا يملك صلاحية الإدارة.'); }
-    $('#app').innerHTML = `<div class="boot"><svg class="spin" viewBox="0 0 64 64"><use href="${ICONS}#noria"/></svg></div>`;
+    if (!A.me) { dropSession(); return renderLogin('هذا الحساب لا يملك صلاحية الإدارة.'); }
     await loadAll();
+    cache.save();
+  })();
+  if (cached && cached.me) {
+    A.me = cached.me;
+    applyData(cached);
+    renderShell();
+    route();
+    try { await fresh; } catch (e) {
+      if (e.status === 401 || e.status === 400) { dropSession(); renderLogin(); }
+      return; // انقطاع الاتصال: نبقى على النسخة المؤقتة
+    }
+    if (!A.me) return;
+    renderNavCounts();
+    if (!document.querySelector('.sheet')) route();
+    return;
+  }
+  try {
+    $('#app').innerHTML = `<div class="boot"><svg class="spin" viewBox="0 0 64 64"><use href="${ICONS}#noria"/></svg></div>`;
+    await fresh;
+    if (!A.me) return;
     renderShell();
     route();
   } catch (e) {
-    if (e.status === 401 || e.status === 400) { auth.clear(); return renderLogin(); }
+    if (e.status === 401 || e.status === 400) { dropSession(); return renderLogin(); }
     $('#app').innerHTML = `<div class="login"><div class="login-card"><h1>تعذّر التحميل</h1><p>${esc(errMsg(e))}</p><button class="btn btn-primary btn-block" onclick="location.reload()">إعادة المحاولة</button></div></div>`;
   }
 }
@@ -1638,3 +1688,5 @@ document.addEventListener('click', async (e) => {
 });
 
 start();
+
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') cache.save(); });
