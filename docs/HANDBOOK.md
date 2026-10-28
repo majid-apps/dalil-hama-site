@@ -19,7 +19,6 @@
    - للعمل على الأرقام والمرشحين أضف أيضاً **`majid-apps/dalil-hama`**.
 2. اكتب طلبك مباشرة. Claude يقرأ `CLAUDE.md` تلقائياً، فيعرف السيرفر والنشر والقواعد.
 3. إن قال Claude إنه لا يرى المستودع: افتح GitHub، ثم Settings، ثم Applications، ثم Claude، ثم Configure، ثم Repository access، واختر «All repositories» أو أضف المستودعين.
-- ⚠️ لا تختر `aposamir/abdulmajid-alia-wedding`، فهو لشخص آخر ولا علاقة له بالدليل.
 
 ## 3) البنية
 ```
@@ -106,7 +105,6 @@ fi; unset P Q
   - تقرير تنظيف البيانات المنشورة.
 
 ## 9) أشياء لا علاقة لها بالدليل
-- مستودع `aposamir/abdulmajid-alia-wedding` يخص شخصاً آخر.
 - `majid-apps/dalil-hama-oldd` نسخة قديمة مؤرشفة.
 - مشروع Supabase قديم باسم `dalil-hama` فيه نسخة قديمة من البيانات، ولم يعد مستخدماً. احذفه من supabase.com إن لم تحتجه.
 
