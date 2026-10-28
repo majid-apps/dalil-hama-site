@@ -72,6 +72,9 @@ function sessionExpired() {
   renderLogin('انتهت الجلسة، سجّل الدخول مجدداً.');
 }
 
+/** آخر الطلبات وأزمنتها، لتشخيص البطء (الصفحة #diag) */
+const perf = { rows: [], push(r) { this.rows.push(r); if (this.rows.length > 60) this.rows.shift(); } };
+
 async function api(path, opts = {}, retry = true) {
   let token;
   try {
@@ -80,9 +83,13 @@ async function api(path, opts = {}, retry = true) {
     if (e.status === 400 || e.status === 401) sessionExpired();
     throw e;
   }
+  const t0 = performance.now();
   try {
-    return await request(path, { ...opts, token });
+    const out = await request(path, { ...opts, token });
+    perf.push({ at: new Date(), m: opts.method || 'GET', path: path.replace('/rest/v1/', '').slice(0, 60), ms: Math.round(performance.now() - t0), ok: true });
+    return out;
   } catch (e) {
+    perf.push({ at: new Date(), m: opts.method || 'GET', path: path.replace('/rest/v1/', '').slice(0, 60), ms: Math.round(performance.now() - t0), ok: false });
     if (e.status === 401 && retry) {
       try { await auth.refresh(); } catch { sessionExpired(); throw e; }
       return api(path, opts, false);
@@ -329,11 +336,21 @@ function deepLink() {
   return { v, id: Number(arg) || null, preset: { name: (q.get('name') || '').slice(0, 160), phones: q.get('phone') ? [normalizePhone(q.get('phone'))] : [] } };
 }
 
+function viewDiag(el) {
+  $('#title').textContent = 'تشخيص السرعة';
+  const rows = [...perf.rows].reverse();
+  el.innerHTML = `<div class="panel"><p class="muted" style="margin-top:0">أزمنة آخر الطلبات من جوالك إلى الخادم (بالميلي ثانية). نفّذ الإجراء البطيء ثم ارجع هنا وصوّر الشاشة.</p>
+    <p>عدد الأنشطة المحمّلة: <b>${fmtNum(A.listings.length)}</b></p>
+    <table class="tbl"><thead><tr><th>الوقت</th><th>الطلب</th><th>المسار</th><th>ms</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${r.at.toLocaleTimeString('en-GB')}</td><td>${r.m}</td><td dir="ltr">${esc(r.path)}</td><td><b${r.ms > 1500 ? ' style="color:var(--danger)"' : ''}>${fmtNum(r.ms)}</b>${r.ok ? '' : ' ✗'}</td></tr>`).join('') || '<tr><td colspan="4">لا طلبات بعد</td></tr>'}</tbody></table>
+    <a class="btn btn-soft mt" href="#cands">رجوع</a></div>`;
+}
+
 function route() {
   const dl = deepLink();
   let v = location.hash.slice(1).split('?')[0].split('/')[0] || 'dash';
   if (dl) v = 'listings';
   if (ALIAS[v]) { A.inboxTab = ALIAS[v][1]; v = ALIAS[v][0]; }
+  if (v === 'diag') return viewDiag($('#content'));
   const def = VIEWS.find((x) => x[0] === v) || VIEWS[0];
   $$('#nav a').forEach((a) => (a.dataset.view === def[0] ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current')));
   const tab = TAB_OF[def[0]] || def[0];
@@ -781,9 +798,10 @@ function drawCandBulk(box, { curRows, redraw, el }) {
         const noSent = rows.filter((r) => !isSent(r)).length;
         if (!(await confirmBox(`نشر ${fmtNum(rows.length)} مرشحاً في الدليل؟${noSent ? ` <br><b>تنبيه:</b> ${fmtNum(noSent)} منهم لم تُرسَل لهم رسالة موافقة.` : ''}`, { ok: 'انشر الكل' }))) return;
         b.disabled = true;
+        const t0 = performance.now();
         const n = await approveMany(rows.map((r) => r.id));
         A.candSel.clear();
-        toast(`تم نشر ${fmtNum(n)} ✓`);
+        toast(`تم نشر ${fmtNum(n)} ✓ (${((performance.now() - t0) / 1000).toFixed(1)} ث)`);
       } else if (act === 'merge') {
         if (!(await confirmBox(`ضمّ ${fmtNum(rows.length)} مرشحاً كلٌّ إلى البطاقة المنشورة المذكورة في ملاحظته (#رقم)، ثم حذفهم؟ من لا بطاقة له يُترك.`, { ok: 'ضمّ الكل' }))) return;
         b.disabled = true;
