@@ -127,10 +127,10 @@ function errMsg(e) {
   return m || 'حدث خطأ غير متوقع';
 }
 
-async function fetchAllListings() {
+async function fetchPages(query) {
   const out = [];
   for (let from = 0; ; from += 1000) {
-    const page = await rest(`listings?select=*&order=id.asc&offset=${from}&limit=1000`);
+    const page = await rest(`${query}&offset=${from}&limit=1000`);
     out.push(...page);
     if (page.length < 1000) break;
   }
@@ -183,15 +183,31 @@ function applyData(d) {
   indexListings();
 }
 
-async function loadAll() {
-  const [listings, cats, areas, settings, stats, reports] = await Promise.all([
-    fetchAllListings(),
+/** تحميل كامل، أو تحديث تفاضلي فوق نسخة محفوظة: لا يُجلب إلا ما تغيّر منذ آخر تحديث (الحمولة الكاملة كانت تستغرق دقائق على الشبكات البطيئة) */
+async function loadListings(base, total) {
+  if (!base || !base.length || !total) return fetchPages('listings?select=*&order=id.asc');
+  const since = new Date(Math.max(...base.map((r) => Date.parse(r.updated_at) || 0)) - 60000).toISOString();
+  const map = new Map(base.map((r) => [r.id, r]));
+  for (const r of await fetchPages(`listings?select=*&order=id.asc&updated_at=gte.${encodeURIComponent(since)}`)) map.set(r.id, r);
+  if (map.size !== total) {
+    // محذوفات أو فروقات: نقارن قائمة المعرّفات (خفيفة) وإن بقي نقص نعيد التحميل الكامل
+    const ids = new Set((await fetchPages('listings?select=id&order=id.asc')).map((r) => r.id));
+    for (const id of [...map.keys()]) if (!ids.has(id)) map.delete(id);
+    if (map.size !== ids.size) return fetchPages('listings?select=*&order=id.asc');
+  }
+  return [...map.values()].sort((a, b) => a.id - b.id);
+}
+
+async function loadAll(base) {
+  const [cats, areas, settings, stats, reports] = await Promise.all([
     rest('categories?select=*&order=sort.asc,name.asc'),
     rest('areas?select=*&order=sort.asc,name.asc'),
     rest('settings?select=*'),
     rpc('admin_stats'),
     rest('reports?select=*&order=created_at.desc&limit=300'),
   ]);
+  const total = ['approved', 'pending', 'hidden', 'rejected'].reduce((n, k) => n + (Number(stats && stats[k]) || 0), 0);
+  const listings = await loadListings(base, total);
   applyData({ listings, cats, areas, settings: Object.fromEntries(settings.map((s) => [s.key, s.value])), stats, reports });
 }
 
@@ -379,7 +395,7 @@ async function start() {
   const fresh = (async () => {
     A.me = await rpc('admin_me');
     if (!A.me) { dropSession(); return renderLogin('هذا الحساب لا يملك صلاحية الإدارة.'); }
-    await loadAll();
+    await loadAll(cached && cached.listings);
     cache.save();
   })();
   if (cached && cached.me) {
@@ -1604,7 +1620,7 @@ function viewIO(el) {
           }
         }
         toast('تم الاستيراد ✓');
-        A.listings = await fetchAllListings();
+        A.listings = await fetchPages('listings?select=*&order=id.asc');
         indexListings();
         refreshStats();
         viewIO(el);
