@@ -97,7 +97,7 @@ const rep = { Prefer: 'return=representation' };
 // ─────────────── الحالة ───────────────
 
 const A = {
-  me: null, listings: [], byId: new Map(), cats: [], catById: new Map(), areas: [], settings: {}, stats: null, reports: [], admins: [], inboxTab: 'req', candTab: 'todo', candQ: '', pendLimit: {},
+  me: null, listings: [], byId: new Map(), cats: [], catById: new Map(), areas: [], settings: {}, stats: null, reports: [], admins: [], inboxTab: 'req', candTab: 'todo', candQ: '', candSel: new Set(), idxDirty: false, pendLimit: {},
   index: new SearchIndex(), f: { q: '', cat: '', status: 'approved', flag: '', area: '', sort: 'new' }, selected: new Set(), page: 0, reportTab: 'open',
 };
 
@@ -136,6 +136,7 @@ function compact(r) {
 
 function indexListings() {
   A.byId = new Map(A.listings.map((r) => [r.id, r]));
+  A.idxDirty = false;
   A.index.setData(A.listings.map(compact), A.cats.map((c) => ({ i: c.id, n: c.name, k: c.keywords, o: c.sort })), A.areas.map((a) => ({ n: a.name })));
 }
 
@@ -162,15 +163,24 @@ async function refreshStats() {
   try { A.stats = await rpc('admin_stats'); renderNavCounts(); } catch { /* ignore */ }
 }
 
-function upsertLocal(row) {
-  const i = A.listings.findIndex((r) => r.id === row.id);
-  if (i === -1) A.listings.push(row); else A.listings[i] = row;
-  indexListings();
+// فهرس البحث يُعاد بناؤه عند أول بحث فقط، لا مع كل موافقة (كان يبطّئ الموافقة والضم)
+function ensureIndex() { if (A.idxDirty) indexListings(); }
+function upsertMany(rows) {
+  for (const row of rows) {
+    const old = A.byId.get(row.id);
+    if (old) A.listings[A.listings.indexOf(old)] = row; else A.listings.push(row);
+    A.byId.set(row.id, row);
+  }
+  A.idxDirty = true;
 }
-function removeLocal(id) {
-  A.listings = A.listings.filter((r) => r.id !== id);
-  indexListings();
+function upsertLocal(row) { upsertMany([row]); }
+function removeMany(ids) {
+  const gone = new Set(ids);
+  A.listings = A.listings.filter((r) => !gone.has(r.id));
+  gone.forEach((id) => A.byId.delete(id));
+  A.idxDirty = true;
 }
+function removeLocal(id) { removeMany([id]); }
 
 // ─────────────── الدخول ───────────────
 
@@ -584,12 +594,158 @@ function attachCand(candId, targetId, done) {
     <input class="input" id="a-q" autocomplete="off" value="${esc(c.name)}"><div class="pick-list" id="a-list"></div>`);
   const draw = () => {
     const q = sh.querySelector('#a-q').value.trim();
-    const res = (q ? A.index.search(q).results.map((x) => x._row) : []).filter((x) => x.status === 'approved' && x.id !== c.id).slice(0, 12);
+    const res = (q ? (ensureIndex(), A.index).search(q).results.map((x) => x._row) : []).filter((x) => x.status === 'approved' && x.id !== c.id).slice(0, 12);
     sh.querySelector('#a-list').innerHTML = res.map((x) => `<button type="button" data-t="${x.id}">${esc(x.name)} <small>#${x.id} · ${esc(catName(x.category_id))} · ${(x.phones || []).join(' / ') || 'بلا رقم'}</small></button>`).join('') || '<p class="muted">لا نتائج. جرّب جزءاً من الاسم.</p>';
   };
   sh.querySelector('#a-q').addEventListener('input', debounce(draw, 150));
   draw();
   sh.querySelector('#a-list').onclick = (e) => { const b = e.target.closest('[data-t]'); if (b) run(Number(b.dataset.t)); };
+}
+
+// ─────────────── إجراءات جماعية للمرشحين ───────────────
+
+const chunk = (a, n) => Array.from({ length: Math.ceil(a.length / n) }, (_, i) => a.slice(i * n, i * n + n));
+/** مفتاح مقارنة الأرقام السورية: آخر 9 خانات (يتجاهل 0 و963 و+) */
+const phoneKey = (p) => String(p).replace(/\D/g, '').slice(-9);
+
+/** الأرقام المحمولة الواردة في نص ملصوق (واتساب، ملاحظات…) */
+function mobilesIn(text) {
+  const out = new Set();
+  for (const m of text.matchAll(/(?<!\d)(?:(?:(?:\+|00)?963|0)[ \t-]?)?9(?:[ \t-]?\d){8}(?!\d)/g)) out.add(phoneKey(m[0]));
+  return out;
+}
+
+/** مراسلة المحدّدين بالتتابع: كل ضغطة تفتح واتساب للتالي وتسجّله «أُرسلت»، دون الرجوع للقائمة بين رسالة وأخرى */
+function messageQueue(rows, redraw) {
+  const queue = rows.filter((r) => r.status === 'pending' && !isSent(r) && (r.phones || []).some(isMobile));
+  if (!queue.length) { toast('لا يوجد بين المحدّدين من لم يُراسَل وله رقم جوال', true); return; }
+  let i = 0;
+  const sh = openSheet('مراسلة جماعية', '<div id="mq"></div>');
+  const mark = (r) => {
+    const note = `${r.admin_note ? `${r.admin_note}\n` : ''}${SENT} طُلبت الموافقة ${new Date().toISOString().slice(0, 10)}`;
+    rest(`listings?id=eq.${r.id}`, { method: 'PATCH', body: { admin_note: note }, headers: rep, keepalive: true })
+      .then(([row]) => { upsertLocal(row); A.candSel.delete(r.id); renderNavCounts(); }).catch((err) => toast(errMsg(err), true));
+  };
+  const show = () => {
+    const box = sh.querySelector('#mq');
+    if (i >= queue.length) { box.innerHTML = `<div class="empty"><div class="big">✅</div><h3>انتهت المراسلة</h3><p>أُرسلت ${fmtNum(queue.length)} رسالة، وانتقلوا إلى «بانتظار الرد».</p></div><button class="btn btn-primary btn-block" id="mq-done">تم</button>`; box.querySelector('#mq-done').onclick = () => { closeSheet(); redraw(); }; return; }
+    const r = queue[i];
+    const mob = r.phones.find(isMobile);
+    box.innerHTML = `<p class="muted" style="margin-top:0">${fmtNum(i + 1)} من ${fmtNum(queue.length)}</p>
+      <div class="req"><h3 style="margin:0 0 4px">${esc(r.name)}</h3><div class="muted"><bdi dir="ltr">${esc(mob)}</bdi> · ${esc(catName(r.category_id))}</div></div>
+      <div class="ops mt"><a class="btn btn-wa btn-lg grow" id="mq-open" href="${waHref(mob, CONSENT_MSG(r.name))}" target="_blank" rel="noopener">${I('wa', 'sm')}فتح واتساب وإرسال</a>
+      <button class="btn btn-soft" id="mq-skip">تخطّي</button></div>
+      <p class="muted" style="font-size:13px">بعد إرسال الرسالة في واتساب ارجع هنا (زر الرجوع) ثم اضغط الزر مرة أخرى للتالي. تُسجَّل «أُرسلت» تلقائياً عند فتح واتساب.</p>`;
+    box.querySelector('#mq-open').onclick = () => { mark(r); i++; setTimeout(show, 400); };
+    box.querySelector('#mq-skip').onclick = () => { i++; show(); };
+  };
+  show();
+}
+
+/** نشر عدة مرشحين بطلب واحد */
+async function approveMany(ids) {
+  const done = [];
+  for (const part of chunk(ids, 150)) done.push(...await rest(`listings?id=in.(${part.join(',')})`, { method: 'PATCH', body: { status: 'approved' }, headers: rep }));
+  upsertMany(done);
+  return done.length;
+}
+
+/** ضمّ كل مرشح إلى البطاقة المنشورة المذكورة في ملاحظته (#رقم)؛ من لا بطاقة له يُترك */
+async function attachMany(cands) {
+  const plan = new Map();
+  const skipped = [];
+  for (const c of cands) {
+    const t = [...(c.admin_note || '').matchAll(/#(\d+)/g)].map((m) => A.byId.get(Number(m[1]))).find((x) => x && x.status === 'approved' && x.id !== c.id);
+    if (!t) { skipped.push(c); continue; }
+    if (!plan.has(t.id)) plan.set(t.id, []);
+    plan.get(t.id).push(c);
+  }
+  const merged = [];
+  const failed = [];
+  for (const [tid, list] of plan) {
+    const t = A.byId.get(tid);
+    const pick = (k) => t[k] ?? list.map((c) => c[k]).find((v) => v != null && v !== '');
+    try {
+      const [row] = await rest(`listings?id=eq.${tid}`, { method: 'PATCH', headers: rep, body: {
+        phones: [...new Set([...(t.phones || []), ...list.flatMap((c) => c.phones || [])])],
+        area: t.area || pick('area'), address: t.address || pick('address'), map_url: t.map_url || pick('map_url'),
+        lat: pick('lat') ?? null, lng: pick('lng') ?? null, website: t.website || pick('website'),
+      } });
+      upsertLocal(row);
+      merged.push(...list);
+    } catch { failed.push(...list); }
+  }
+  const ids = merged.map((c) => c.id);
+  for (const part of chunk(ids, 150)) await rest(`listings?id=in.(${part.join(',')})`, { method: 'DELETE' });
+  removeMany(ids);
+  return { merged: ids.length, skipped: skipped.length, failed: failed.length };
+}
+
+function drawCandBulk(box, { curRows, redraw, el }) {
+  const draw = () => {
+    const n = A.candSel.size;
+    const tabBtn = el.querySelector('[data-ctab="sel"]');
+    if (tabBtn) tabBtn.textContent = `المحدّدون (${fmtNum(n)})`;
+    box.innerHTML = `<div class="bulk"><b>${n ? `${fmtNum(n)} محدد` : 'إجراءات جماعية'}</b>
+      <button class="btn btn-soft" data-b="all">تحديد الكل (${fmtNum(curRows().length)})</button>
+      <button class="btn btn-soft" data-b="paste">تحديد من أرقام ملصوقة</button>
+      ${n ? `<button class="btn btn-wa" data-b="msg">${I('wa', 'sm')}مراسلة المحدّدين</button>
+      <button class="btn btn-primary" data-b="ok">${I('check', 'sm')}وافق — انشر المحدّدين</button>
+      <button class="btn btn-soft" data-b="merge">${I('merge', 'sm')}ضمّ المحدّدين</button>
+      <button class="btn btn-ghost" data-b="clear" style="color:inherit">إلغاء التحديد</button>` : ''}</div>`;
+    el.querySelectorAll('[data-csel]').forEach((cb) => { cb.checked = A.candSel.has(Number(cb.dataset.csel)); });
+  };
+  el.onCandSel = draw;
+  draw();
+  const sel = () => [...A.candSel].map((id) => A.byId.get(id)).filter((r) => r && r.status === 'pending');
+  box.onclick = async (e) => {
+    const b = e.target.closest('[data-b]');
+    if (!b) return;
+    const act = b.dataset.b;
+    if (act === 'all') { curRows().forEach((r) => A.candSel.add(r.id)); draw(); return; }
+    if (act === 'clear') { A.candSel.clear(); if (A.candTab === 'sel') A.candTab = 'sent'; redraw(); return; }
+    if (act === 'paste') {
+      const sh = openSheet('تحديد من أرقام ملصوقة', `<p style="margin-top:0">الصق أرقام من ردّوا «موافق» (من محادثات واتساب أو أي قائمة). أي رقم جوال في النص يُطابَق مع المرشحين.</p>
+        <textarea class="input" id="p-txt" rows="8" dir="auto" style="width:100%"></textarea>
+        <div class="ops mt"><button class="btn btn-primary" id="p-go">تحديد المطابقين</button></div>`);
+      sh.querySelector('#p-go').onclick = () => {
+        const keys = mobilesIn(sh.querySelector('#p-txt').value);
+        if (!keys.size) { toast('لم أجد أرقام جوال في النص', true); return; }
+        const all = A.listings.filter(isCand);
+        const hit = new Set();
+        for (const r of all) if ((r.phones || []).some((p) => isMobile(p) && keys.has(phoneKey(p)))) { A.candSel.add(r.id); hit.add(r.id); }
+        const found = new Set(all.flatMap((r) => (r.phones || []).map(phoneKey)));
+        const miss = [...keys].filter((k) => !found.has(k));
+        closeSheet();
+        A.candTab = 'sel';
+        toast(`حُدّد ${fmtNum(hit.size)} مرشحاً${miss.length ? ` — ${fmtNum(miss.length)} رقم غير موجود بين المرشحين` : ''}`);
+        redraw();
+      };
+      return;
+    }
+    const rows = sel();
+    if (!rows.length) return;
+    if (act === 'msg') { messageQueue(rows, redraw); return; }
+    try {
+      if (act === 'ok') {
+        const noSent = rows.filter((r) => !isSent(r)).length;
+        if (!(await confirmBox(`نشر ${fmtNum(rows.length)} مرشحاً في الدليل؟${noSent ? ` <br><b>تنبيه:</b> ${fmtNum(noSent)} منهم لم تُرسَل لهم رسالة موافقة.` : ''}`, { ok: 'انشر الكل' }))) return;
+        b.disabled = true;
+        const n = await approveMany(rows.map((r) => r.id));
+        A.candSel.clear();
+        toast(`تم نشر ${fmtNum(n)} ✓`);
+      } else if (act === 'merge') {
+        if (!(await confirmBox(`ضمّ ${fmtNum(rows.length)} مرشحاً كلٌّ إلى البطاقة المنشورة المذكورة في ملاحظته (#رقم)، ثم حذفهم؟ من لا بطاقة له يُترك.`, { ok: 'ضمّ الكل' }))) return;
+        b.disabled = true;
+        const r = await attachMany(rows);
+        rows.forEach((c) => { if (!A.byId.has(c.id)) A.candSel.delete(c.id); });
+        toast(`تم ضمّ ${fmtNum(r.merged)}${r.skipped ? ` — تُرك ${fmtNum(r.skipped)} بلا بطاقة مذكورة` : ''}${r.failed ? ` — فشل ${fmtNum(r.failed)}` : ''}`, !!r.failed);
+      }
+      refreshStats();
+      renderNavCounts();
+      redraw();
+    } catch (err) { b.disabled = false; toast(errMsg(err), true); }
+  };
 }
 
 function viewPending(el, mode = 'req') {
@@ -602,20 +758,25 @@ function viewPending(el, mode = 'req') {
     return;
   }
   const n = { todo: all.filter((r) => !isSent(r)).length, sent: all.filter(isSent).length, all: all.length };
-  el.innerHTML = `${cand ? `<div class="toolbar"><div class="seg-tabs">${[['todo', 'لم يُراسَل'], ['sent', 'بانتظار الرد'], ['all', 'الكل']]
-    .map(([k, l]) => `<button type="button" data-ctab="${k}" aria-pressed="${A.candTab === k}">${l} (${fmtNum(n[k])})</button>`).join('')}</div>
-    <input class="input grow" id="cand-q" type="search" placeholder="ابحث بالاسم أو جزء من الرقم…" value="${esc(A.candQ)}"></div>` : ''}<div id="pend-list"></div>`;
+  el.innerHTML = `${cand ? `<div class="toolbar"><div class="seg-tabs">${[['todo', 'لم يُراسَل'], ['sent', 'بانتظار الرد'], ['all', 'الكل'], ['sel', 'المحدّدون']]
+    .map(([k, l]) => `<button type="button" data-ctab="${k}" aria-pressed="${A.candTab === k}">${l} (${fmtNum(k === 'sel' ? A.candSel.size : n[k])})</button>`).join('')}</div>
+    <input class="input grow" id="cand-q" type="search" placeholder="ابحث بالاسم أو جزء من الرقم…" value="${esc(A.candQ)}"></div><div id="cand-bulk"></div>` : ''}<div id="pend-list"></div>`;
+  if (cand) for (const id of [...A.candSel]) { const r = A.byId.get(id); if (!r || r.status !== 'pending') A.candSel.delete(id); }
   // فهرس الأرقام المنشورة مرة واحدة بدل مسح كل الأنشطة لكل بطاقة
   const byPhone = new Map();
   for (const x of A.listings) if (x.status === 'approved') for (const p of x.phones || []) { if (!byPhone.has(p)) byPhone.set(p, []); byPhone.get(p).push(x); }
-  const draw = () => {
+  const curRows = () => {
     let rows = all;
     if (cand) {
       const q = normalize(A.candQ);
       const qd = A.candQ.replace(/\D/g, '');
-      rows = rows.filter((r) => (A.candTab === 'all' || (A.candTab === 'sent') === isSent(r))
-        && (!q || normalize(r.name).includes(q) || (qd.length >= 3 && (r.phones || []).some((p) => p.includes(qd)))));
+      const inTab = (r) => (A.candTab === 'all' ? true : A.candTab === 'sel' ? A.candSel.has(r.id) : (A.candTab === 'sent') === isSent(r));
+      rows = rows.filter((r) => inTab(r) && (!q || normalize(r.name).includes(q) || (qd.length >= 3 && (r.phones || []).some((p) => p.includes(qd)))));
     }
+    return rows;
+  };
+  const draw = () => {
+    const rows = curRows();
     const lim = A.pendLimit[mode] || PEND_PAGE;
     $('#pend-list', el).innerHTML = (rows.slice(0, lim).map((r) => {
       const dupIds = [...new Set((r.phones || []).flatMap((p) => byPhone.get(p) || []))].filter((x) => x.id !== r.id);
@@ -624,7 +785,7 @@ function viewPending(el, mode = 'req') {
       const targets = cand ? [...new Set([...(r.admin_note || '').matchAll(/#(\d+)/g)].map((m) => Number(m[1])))]
         .map((id) => A.byId.get(id)).filter((x) => x && x.status === 'approved' && x.id !== r.id).slice(0, 2) : [];
       return `<div class="req" data-id="${r.id}">
-      <div class="req-head"><span class="avatar" style="--hue:${catHue(r.category_id)}">${catIcon(r.category_id)}</span>
+      <div class="req-head">${cand ? `<input type="checkbox" data-csel="${r.id}" aria-label="تحديد"${A.candSel.has(r.id) ? ' checked' : ''} style="width:22px;height:22px;flex:none">` : ''}<span class="avatar" style="--hue:${catHue(r.category_id)}">${catIcon(r.category_id)}</span>
         <div style="flex:1;min-width:0"><h3>${esc(r.name)}</h3><div class="muted" style="font-size:13px">${esc(catName(r.category_id))} · ${timeAgo(r.created_at)} · #${r.id}</div></div>${cand && isSent(r) ? '<span class="st hidden">بانتظار الرد</span>' : st(r.status)}</div>
       <dl class="kv">
         <dt>الأرقام</dt><dd>${phonesHtml(r)}</dd>
@@ -651,10 +812,18 @@ function viewPending(el, mode = 'req') {
       + (rows.length > lim ? `<button class="btn btn-soft btn-block mt" type="button" data-more>عرض المزيد (${fmtNum(rows.length - lim)} متبقٍ)</button>` : '');
   };
   draw();
+  if (cand) drawCandBulk($('#cand-bulk', el), { curRows, redraw: () => viewPending(el, mode), el });
   const q = $('#cand-q', el);
   if (q) q.addEventListener('input', debounce(() => { A.candQ = q.value; A.pendLimit[mode] = PEND_PAGE; draw(); }, 200));
   // إعادة الرسم بعد كل إجراء مع تحديث العدّادات (وتبويبات «الطلبات والبلاغات» إن كنا داخلها)
   const again = () => { renderNavCounts(); if (el.id === 'inbox-box') viewInbox($('#content')); else viewPending(el, mode); };
+  el.onchange = (e) => {
+    const cb = e.target.closest('[data-csel]');
+    if (!cb) return;
+    const id = Number(cb.dataset.csel);
+    if (cb.checked) A.candSel.add(id); else A.candSel.delete(id);
+    if (el.onCandSel) el.onCandSel();
+  };
   el.onclick = async (e) => {
     const tab = e.target.closest('[data-ctab]');
     if (tab) { A.candTab = tab.dataset.ctab; A.pendLimit[mode] = PEND_PAGE; viewPending(el, mode); return; }
@@ -770,7 +939,7 @@ function viewReports(el) {
 function filtered() {
   const f = A.f;
   let rows;
-  if (f.q.trim()) rows = A.index.search(f.q).results.map((c) => c._row);
+  if (f.q.trim()) rows = (ensureIndex(), A.index).search(f.q).results.map((c) => c._row);
   else rows = A.listings;
   rows = rows.filter((r) => {
     if (f.status !== 'all' && r.status !== f.status) return false;
@@ -1032,7 +1201,7 @@ function mergeDialog(keepId) {
     const q = sh.querySelector('#m-q').value.trim();
     const cur = A.byId.get(keepId) || keep;
     const sameP = A.listings.filter((x) => x.id !== keepId && (x.phones || []).some((p) => (cur.phones || []).includes(p)));
-    const res = q ? A.index.search(q).results.map((c) => c._row).filter((x) => x.id !== keepId).slice(0, 10) : sameP;
+    const res = q ? (ensureIndex(), A.index).search(q).results.map((c) => c._row).filter((x) => x.id !== keepId).slice(0, 10) : sameP;
     sh.querySelector('#m-list').innerHTML = res.map((x) => `<button type="button" data-m="${x.id}">${esc(x.name)} <small>#${x.id} · ${esc(catName(x.category_id))} · ${(x.phones || []).join(' / ')}</small></button>`).join('') || '<p class="muted">اكتب للبحث.</p>';
   };
   sh.querySelector('#m-q').addEventListener('input', draw);
