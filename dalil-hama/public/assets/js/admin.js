@@ -48,7 +48,12 @@ const auth = {
     const r = await request('/auth/v1/token?grant_type=password', { method: 'POST', body: { email: id, password } });
     this.save(r);
   },
-  async refresh() {
+  /** الطلبات المتزامنة تنتظر تجديداً واحداً، فلا يُستعمل رمز التجديد نفسه مرتين */
+  refresh() {
+    if (!this.refreshing) this.refreshing = this.renew().finally(() => { this.refreshing = null; });
+    return this.refreshing;
+  },
+  async renew() {
     if (!this.session) throw new ApiError('no session', 401);
     // تبويب آخر جدّد الجلسة: نعتمد جلسته بدلاً من تجديد ثانٍ برمز صار ملغى
     const s = store.get(SESSION_KEY);
@@ -69,6 +74,7 @@ const auth = {
 
 function sessionExpired() {
   auth.clear();
+  A.me = null;
   renderLogin('انتهت الجلسة، سجّل الدخول مجدداً.');
 }
 
@@ -99,6 +105,8 @@ const rep = { Prefer: 'return=representation' };
 const A = {
   me: null, listings: [], byId: new Map(), cats: [], catById: new Map(), areas: [], settings: {}, stats: null, reports: [], admins: [], inboxTab: 'req', candTab: 'todo', candQ: '', pendLimit: {},
   index: new SearchIndex(), f: { q: '', cat: '', status: 'approved', flag: '', area: '', sort: 'new' }, selected: new Set(), page: 0, reportTab: 'open',
+  // الجلب في الخلفية: fresh = جُلبت آخر التعديلات منذ فُتحت اللوحة (أو عادت إليها)، gone = ما حُذف هنا أثناء الجلب
+  fresh: false, syncP: null, gone: new Set(), stale: false, offline: false, hiddenAt: 0,
 };
 
 function toast(msg, bad = false) {
@@ -120,14 +128,15 @@ function errMsg(e) {
   return m || 'حدث خطأ غير متوقع';
 }
 
-async function fetchAllListings() {
+/** كل صفوف الاستعلام على صفحات من 1000 (حدّ الخادم). onPage يُبلَّغ بالعدد بعد كل صفحة */
+async function fetchPaged(q, onPage) {
   const out = [];
   for (let from = 0; ; from += 1000) {
-    const page = await rest(`listings?select=*&order=id.asc&offset=${from}&limit=1000`);
+    const page = await rest(`${q}&offset=${from}&limit=1000`);
     out.push(...page);
-    if (page.length < 1000) break;
+    if (onPage) onPage(out.length);
+    if (page.length < 1000) return out;
   }
-  return out;
 }
 
 function compact(r) {
@@ -137,29 +146,178 @@ function compact(r) {
 function indexListings() {
   A.byId = new Map(A.listings.map((r) => [r.id, r]));
   A.index.setData(A.listings.map(compact), A.cats.map((c) => ({ i: c.id, n: c.name, k: c.keywords, o: c.sort })), A.areas.map((a) => ({ n: a.name })));
+  persist();
 }
 
-async function loadAll() {
-  const [listings, cats, areas, settings, stats, reports] = await Promise.all([
-    fetchAllListings(),
+function applyData(d) {
+  A.listings = d.listings;
+  A.cats = d.cats;
+  A.catById = new Map(d.cats.map((c) => [c.id, c]));
+  A.areas = d.areas;
+  A.settings = d.settings;
+  A.stats = d.stats;
+  A.reports = d.reports;
+  indexListings();
+}
+
+// ─────────────── النسخة المحفوظة على الجهاز ───────────────
+// تفتح اللوحة فوراً من آخر نسخة محفوظة في الجهاز (IndexedDB)، ثم يُجلب ما تغيّر فقط في الخلفية (syncNow).
+// كل تعديل يُبنى على بيانات بطاقة يمرّ على freshRows() فلا تُحفظ نسخة قديمة فوق أحدث منها.
+
+const SAVED_V = 1;
+const LAST_KEY = 'dh:admin-last';
+
+function idb(mode, op) {
+  return new Promise((resolve, reject) => {
+    const open = indexedDB.open('dh-admin', 1);
+    open.onupgradeneeded = () => open.result.createObjectStore('kv');
+    open.onerror = () => reject(open.error);
+    open.onsuccess = () => {
+      const db = open.result;
+      try {
+        const tx = db.transaction('kv', mode);
+        const req = op(tx.objectStore('kv'));
+        tx.oncomplete = () => { db.close(); resolve(req.result); };
+        tx.onerror = () => { db.close(); reject(tx.error); };
+        tx.onabort = () => { db.close(); reject(tx.error); };
+      } catch (e) { db.close(); reject(e); }
+    };
+  });
+}
+const saved = {
+  get: () => idb('readonly', (s) => s.get('data')).catch(() => null),
+  put: (v) => idb('readwrite', (s) => s.put(v, 'data')).catch(() => {}),
+  del: () => idb('readwrite', (s) => s.delete('data')).catch(() => {}),
+};
+
+let dirty = false;
+function persistNow() {
+  if (!dirty || !A.me || !auth.session) return;
+  dirty = false;
+  saved.put({ v: SAVED_V, uid: auth.session.uid, at: Date.now(), me: A.me, listings: A.listings, cats: A.cats, areas: A.areas, settings: A.settings, stats: A.stats, reports: A.reports });
+  // يطلب ألا يمسح المتصفح النسخة عند ضيق المساحة (يُمنح عادة للتطبيق المثبّت دون سؤال)
+  if (navigator.storage && navigator.storage.persist && !persistNow.asked) { persistNow.asked = true; navigator.storage.persist().catch(() => {}); }
+}
+const persistSoon = debounce(persistNow, 2000);
+function persist() { dirty = true; persistSoon(); }
+
+/** وقت آخر تعديل في البطاقات التي معنا، ناقص عشر دقائق لما تأخر حفظه في القاعدة */
+function since() {
+  let max = 0;
+  for (const r of A.listings) { const t = Date.parse(r.updated_at); if (t > max) max = t; }
+  return max ? new Date(max - 600000).toISOString() : null;
+}
+
+/** يجلب ما تغيّر منذ النسخة التي معنا (أو كل شيء أول مرة)، ويعيد true إن تغيّر شيء */
+async function pull(onPage) {
+  const from = since();
+  const [me, rows, cats, areas, settings, stats, reports] = await Promise.all([
+    rpc('admin_me'),
+    fetchPaged(from ? `listings?select=*&updated_at=gt.${encodeURIComponent(from)}&order=id.asc` : 'listings?select=*&order=id.asc', onPage),
     rest('categories?select=*&order=sort.asc,name.asc'),
     rest('areas?select=*&order=sort.asc,name.asc'),
     rest('settings?select=*'),
     rpc('admin_stats'),
     rest('reports?select=*&order=created_at.desc&limit=300'),
   ]);
-  A.listings = listings;
-  A.cats = cats;
-  A.catById = new Map(cats.map((c) => [c.id, c]));
-  A.areas = areas;
-  A.settings = Object.fromEntries(settings.map((s) => [s.key, s.value]));
-  A.stats = stats;
-  A.reports = reports;
-  indexListings();
+  if (!me) throw Object.assign(new ApiError('هذا الحساب لا يملك صلاحية الإدارة.', 403), { notAdmin: true });
+  // ما تغيّر يدخل النسخة الحالية، إلا ما عُدّل أو حُذف هنا أثناء الجلب فهو أحدث
+  const byId = new Map(from ? A.listings.map((r) => [r.id, r]) : []);
+  let changed = !from;
+  for (const r of rows) {
+    const cur = byId.get(r.id);
+    if (A.gone.has(r.id) || (cur && Date.parse(cur.updated_at) > Date.parse(r.updated_at))) continue;
+    if (!cur || cur.updated_at !== r.updated_at) changed = true;
+    byId.set(r.id, r);
+  }
+  // العدد عند الخادم يكشف المحذوف هناك وما فات: عندها فقط تُجلب أرقام كل البطاقات (id وحده) للمطابقة
+  const total = ['approved', 'pending', 'hidden', 'rejected'].reduce((n, k) => n + (stats[k] || 0), 0);
+  if (byId.size !== total) {
+    const ids = new Set((await fetchPaged('listings?select=id&order=id.asc')).map((r) => r.id));
+    for (const id of byId.keys()) if (!ids.has(id)) { byId.delete(id); changed = true; }
+    const missing = [...ids].filter((id) => !byId.has(id));
+    for (let i = 0; i < missing.length; i += 150) {
+      for (const r of await rest(`listings?select=*&id=in.(${missing.slice(i, i + 150).join(',')})`)) byId.set(r.id, r);
+      changed = true;
+    }
+  }
+  const sets = Object.fromEntries(settings.map((s) => [s.key, s.value]));
+  A.me = me;
+  // فهرس البحث يُبنى من جديد فقط إن تغيّرت البطاقات أو التصنيفات أو الأحياء
+  if (changed || JSON.stringify([cats, areas]) !== JSON.stringify([A.cats, A.areas])) {
+    applyData({ listings: [...byId.values()].sort((a, b) => a.id - b.id), cats, areas, settings: sets, stats, reports });
+    return true;
+  }
+  if (JSON.stringify([sets, stats, reports]) === JSON.stringify([A.settings, A.stats, A.reports])) return false;
+  Object.assign(A, { settings: sets, stats, reports });
+  persist();
+  return true;
 }
 
+/** جلب واحد في كل مرة. again: بعد الجلب الجاري جلبٌ جديد (بعد الاستيراد مثلاً) */
+function syncNow({ onPage, again = false } = {}) {
+  if (A.syncP && again) return A.syncP.catch(() => {}).then(() => syncNow({ onPage }));
+  if (!A.syncP) {
+    syncBadge(true);
+    A.syncP = pull(onPage)
+      .then((changed) => { A.fresh = true; A.offline = false; return changed; }, (e) => { A.offline = !e.status; throw e; })
+      .finally(() => { A.syncP = null; A.gone.clear(); syncBadge(false); });
+  }
+  return A.syncP;
+}
+
+function syncFailed(e, quiet = false) {
+  if (!A.me) return; // انتهت الجلسة وظهرت شاشة الدخول
+  if (e.notAdmin) { auth.clear(); A.me = null; saved.del(); renderLogin(e.message); return; }
+  if (A.offline) { if (!quiet) toast('لا اتصال الآن — تعرض اللوحة آخر نسخة محفوظة'); return; }
+  toast(errMsg(e), true);
+}
+
+function syncBadge(busy) {
+  const b = $('#sync');
+  if (!b) return;
+  b.classList.toggle('busy', busy);
+  b.classList.toggle('off', !busy && A.offline);
+  b.title = busy ? 'أجلب آخر التعديلات…' : A.offline ? 'لا اتصال: تعرض آخر نسخة محفوظة. اضغط للمحاولة' : 'جلب آخر التعديلات';
+}
+
+/** بعد الجلب في الخلفية: إعادة رسم الشاشة في مكانها، إلا فوق نافذة مفتوحة أو أثناء الكتابة (فبعدها) */
+function refreshView(changed) {
+  if (!A.me || !$('#content')) return;
+  renderNavCounts();
+  if (!changed && !A.stale) return;
+  const el = document.activeElement;
+  if (sheet || document.querySelector('dialog[open]') || (el && el.closest('#content') && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) { A.stale = true; return; }
+  const y = window.scrollY;
+  route(true);
+  window.scrollTo(0, y);
+}
+
+/** البطاقات قبل تعديل يُبنى على بياناتها: إن لم تُجلب آخر التعديلات بعدُ منذ فتح اللوحة جُلبت هذه من الخادم */
+async function freshRows(ids) {
+  if (!A.fresh && A.syncP) await A.syncP.catch(() => {});
+  if (!A.fresh) {
+    const rows = await rest(`listings?select=*&id=in.(${ids.join(',')})`);
+    const got = new Map(rows.map((r) => [r.id, r]));
+    A.listings = A.listings.filter((r) => !ids.includes(r.id) || got.has(r.id)).map((r) => got.get(r.id) || r);
+    for (const r of rows) if (!A.byId.has(r.id)) A.listings.push(r);
+    indexListings();
+  }
+  return ids.map((id) => A.byId.get(id));
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { A.hiddenAt = Date.now(); persistNow(); return; }
+  // عاد إلى اللوحة بعد أكثر من دقيقتين: يُجلب ما تغيّر، وما يُعدَّل قبل وصوله يُجلب أولاً
+  if (A.me && auth.session && A.hiddenAt && Date.now() - A.hiddenAt > 120000) {
+    A.fresh = false;
+    syncNow().then(refreshView, (e) => syncFailed(e, true));
+  }
+});
+window.addEventListener('online', () => { if (A.me && auth.session && !A.fresh) syncNow().then(refreshView, (e) => syncFailed(e, true)); });
+
 async function refreshStats() {
-  try { A.stats = await rpc('admin_stats'); renderNavCounts(); } catch { /* ignore */ }
+  try { A.stats = await rpc('admin_stats'); renderNavCounts(); persist(); } catch { /* ignore */ }
 }
 
 function upsertLocal(row) {
@@ -168,6 +326,7 @@ function upsertLocal(row) {
   indexListings();
 }
 function removeLocal(id) {
+  A.gone.add(id);
   A.listings = A.listings.filter((r) => r.id !== id);
   indexListings();
 }
@@ -249,7 +408,7 @@ function renderShell() {
     ? `<a href="/?preview=visitor" data-tab="${k}">${I(ic)}<span>${l}</span></a>`
     : `<a href="#${k}" data-tab="${k}">${I(ic)}<span>${l}</span><b class="n" data-count="${k}" hidden></b></a>`)).join('')}</nav>
     <div class="main">
-      <header class="bar"><button class="icon-btn menu" type="button" id="menu" aria-label="القائمة">${I('menu')}</button><h1 id="title"></h1><div id="bar-actions" style="display:flex;gap:8px"></div></header>
+      <header class="bar"><button class="icon-btn menu" type="button" id="menu" aria-label="القائمة">${I('menu')}</button><h1 id="title"></h1><div id="bar-actions" style="display:flex;gap:8px"></div><button class="icon-btn sync" type="button" id="sync" aria-label="جلب آخر التعديلات">${I('refresh')}</button></header>
       <div class="content" id="content"></div>
     </div>
   </div>`;
@@ -262,14 +421,19 @@ function renderShell() {
   $('#logout').addEventListener('click', async () => {
     try { await api('/auth/v1/logout', { method: 'POST' }); } catch { /* ignore */ }
     auth.clear();
+    A.me = null;
+    saved.del();
+    store.del(LAST_KEY);
     renderLogin();
   });
+  $('#sync').addEventListener('click', () => syncNow({ again: true }).then((ch) => { refreshView(ch); toast(ch ? 'جُلبت آخر التعديلات ✓' : 'البيانات محدّثة ✓'); }, syncFailed));
   $('#theme-btn').addEventListener('click', () => {
     const dark = document.documentElement.dataset.theme ? document.documentElement.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
     document.documentElement.dataset.theme = dark ? 'light' : 'dark';
     store.set('dh:theme', document.documentElement.dataset.theme);
   });
   renderNavCounts();
+  syncBadge(!!A.syncP);
 }
 
 function renderNavCounts() {
@@ -290,8 +454,10 @@ function deepLink() {
   return { v, id: Number(arg) || null, preset: { name: (q.get('name') || '').slice(0, 160), phones: q.get('phone') ? [normalizePhone(q.get('phone'))] : [] } };
 }
 
-function route() {
+function route(keepScroll = false) {
   const dl = deepLink();
+  A.stale = false;
+  if (!dl) store.set(LAST_KEY, { h: location.hash || '#dash', t: Date.now() });
   let v = location.hash.slice(1).split('?')[0].split('/')[0] || 'dash';
   if (dl) v = 'listings';
   if (ALIAS[v]) { A.inboxTab = ALIAS[v][1]; v = ALIAS[v][0]; }
@@ -302,7 +468,7 @@ function route() {
   $('#title').textContent = def[1];
   $('#bar-actions').innerHTML = '';
   const fn = { dash: viewDash, cands: viewCands, inbox: viewInbox, listings: viewListings, quality: viewQuality, cats: viewCats, areas: viewAreas, io: viewIO, log: viewLog, settings: viewSettings }[def[0]];
-  window.scrollTo(0, 0);
+  if (!keepScroll) window.scrollTo(0, 0);
   fn($('#content'));
   if (dl) {
     // نُرجع العنوان إلى القائمة حتى لا يُعاد فتح النافذة عند التحديث أو الرجوع
@@ -318,16 +484,32 @@ async function start() {
   try { sessionStorage.removeItem('dh:preview'); } catch { /* ignore */ }
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('/sw.js').catch(() => {});
   if (!auth.session) return renderLogin();
+  // فُتحت اللوحة من أيقونتها: تعود إلى آخر شاشة كنت فيها خلال ثلاث ساعات
+  const last = store.get(LAST_KEY);
+  if (!location.hash && last && last.h && Date.now() - last.t < 3 * 3600000) history.replaceState(null, '', last.h);
+  // آخر نسخة محفوظة على الجهاز: تُعرض فوراً، وتُجلب التعديلات في الخلفية
+  const s = await saved.get();
+  if (s && s.v === SAVED_V && s.me && s.uid === auth.session.uid) {
+    A.me = s.me;
+    applyData(s);
+    dirty = false;
+    renderShell();
+    route();
+    syncNow().then(refreshView, syncFailed);
+    return;
+  }
   try {
-    A.me = await rpc('admin_me');
-    if (!A.me) { auth.clear(); return renderLogin('هذا الحساب لا يملك صلاحية الإدارة.'); }
-    $('#app').innerHTML = `<div class="boot"><svg class="spin" viewBox="0 0 64 64"><use href="${ICONS}#noria"/></svg></div>`;
-    await loadAll();
+    $('#app').innerHTML = `<div class="boot"><div><svg class="spin" viewBox="0 0 64 64"><use href="${ICONS}#noria"/></svg>
+      <p id="boot-msg">أول فتح على هذا الجهاز: تُنزَّل البيانات مرة واحدة، وبعدها تفتح اللوحة فوراً.</p></div></div>`;
+    await syncNow({ onPage: (n) => { const m = $('#boot-msg'); if (m) m.textContent = `أنزّل البطاقات: ${fmtNum(n)}… (مرة واحدة على هذا الجهاز)`; } });
     renderShell();
     route();
   } catch (e) {
-    if (e.status === 401 || e.status === 400) { auth.clear(); return renderLogin(); }
-    $('#app').innerHTML = `<div class="login"><div class="login-card"><h1>تعذّر التحميل</h1><p>${esc(errMsg(e))}</p><button class="btn btn-primary btn-block" onclick="location.reload()">إعادة المحاولة</button></div></div>`;
+    if (e.notAdmin) { auth.clear(); A.me = null; return renderLogin(e.message); }
+    if (e.status === 401 || e.status === 400) { auth.clear(); A.me = null; return renderLogin(); }
+    A.me = null;
+    $('#app').innerHTML = `<div class="login"><div class="login-card"><h1>تعذّر التحميل</h1><p>${esc(errMsg(e))}</p><button class="btn btn-primary btn-block" type="button" id="retry">إعادة المحاولة</button></div></div>`;
+    $('#retry').addEventListener('click', () => location.reload());
   }
 }
 
@@ -393,6 +575,7 @@ function closeSheet() {
   setTimeout(() => { bd.remove(); sh.remove(); }, 300);
   sheet = null;
   document.documentElement.style.overflow = '';
+  if (A.stale) setTimeout(() => refreshView(false), 320); // وصلت تعديلات أثناء فتح النافذة
 }
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && sheet && !document.querySelector('dialog[open]')) closeSheet();
@@ -557,11 +740,13 @@ const PEND_PAGE = 40;
 
 /** ضمّ أرقام مرشح إلى بطاقة منشورة (يكمل الناقص فيها) ثم حذف المرشح. بلا targetId: نافذة بحث لاختيار البطاقة */
 function attachCand(candId, targetId, done) {
-  const c = A.byId.get(candId);
-  if (!c) return;
+  const c0 = A.byId.get(candId);
+  if (!c0) return;
   const run = async (tid) => {
-    const t = A.byId.get(tid);
-    if (!t) return;
+    let c;
+    let t;
+    try { [c, t] = await freshRows([candId, tid]); } catch (err) { toast(errMsg(err), true); return; }
+    if (!c || !t) { toast('لم تعد إحدى البطاقتين موجودة (ربما حُذفت)', true); return; }
     const add = (c.phones || []).filter((p) => !(t.phones || []).includes(p));
     if (!(await confirmBox(`ضمّ ${add.length ? `الرقم <b dir="ltr">${esc(add.join(' / '))}</b>` : 'معلومات'} «${esc(c.name)}» إلى البطاقة المنشورة «${esc(t.name)}»؟ سيظهر للزوار، ويُحذف المرشح.`, { ok: 'ضمّ' }))) return;
     try {
@@ -580,11 +765,11 @@ function attachCand(candId, targetId, done) {
     } catch (err) { toast(errMsg(err), true); }
   };
   if (targetId) { run(targetId); return; }
-  const sh = openSheet('ضمّ إلى بطاقة موجودة', `<p style="margin-top:0">اختر البطاقة المنشورة التي يتبع لها «<b>${esc(c.name)}</b>»، فتُضاف أرقامه إليها ويُحذف المرشح.</p>
-    <input class="input" id="a-q" autocomplete="off" value="${esc(c.name)}"><div class="pick-list" id="a-list"></div>`);
+  const sh = openSheet('ضمّ إلى بطاقة موجودة', `<p style="margin-top:0">اختر البطاقة المنشورة التي يتبع لها «<b>${esc(c0.name)}</b>»، فتُضاف أرقامه إليها ويُحذف المرشح.</p>
+    <input class="input" id="a-q" autocomplete="off" value="${esc(c0.name)}"><div class="pick-list" id="a-list"></div>`);
   const draw = () => {
     const q = sh.querySelector('#a-q').value.trim();
-    const res = (q ? A.index.search(q).results.map((x) => x._row) : []).filter((x) => x.status === 'approved' && x.id !== c.id).slice(0, 12);
+    const res = (q ? A.index.search(q).results.map((x) => x._row) : []).filter((x) => x.status === 'approved' && x.id !== c0.id).slice(0, 12);
     sh.querySelector('#a-list').innerHTML = res.map((x) => `<button type="button" data-t="${x.id}">${esc(x.name)} <small>#${x.id} · ${esc(catName(x.category_id))} · ${(x.phones || []).join(' / ') || 'بلا رقم'}</small></button>`).join('') || '<p class="muted">لا نتائج. جرّب جزءاً من الاسم.</p>';
   };
   sh.querySelector('#a-q').addEventListener('input', debounce(draw, 150));
@@ -664,12 +849,14 @@ function viewPending(el, mode = 'req') {
     const wa = e.target.closest('[data-wa-sent]');
     if (wa) {
       // يفتح واتساب برسالة الموافقة، ويُسجَّل «أُرسلت» في الخلفية (التراجع من تبويب «بانتظار الرد»)
-      const r0 = A.byId.get(Number(wa.dataset.waSent));
-      if (!r0 || isSent(r0)) return;
-      const note = `${r0.admin_note ? `${r0.admin_note}\n` : ''}${SENT} طُلبت الموافقة ${new Date().toISOString().slice(0, 10)}`;
-      rest(`listings?id=eq.${r0.id}`, { method: 'PATCH', body: { admin_note: note }, headers: rep, keepalive: true })
-        .then(([row]) => { upsertLocal(row); toast('سُجّلت «أُرسلت» ✓ — التراجع من «بانتظار الرد»'); again(); })
-        .catch((err) => toast(errMsg(err), true));
+      const id0 = Number(wa.dataset.waSent);
+      if (!A.byId.get(id0) || isSent(A.byId.get(id0))) return;
+      freshRows([id0]).then(([r0]) => {
+        if (!r0 || isSent(r0)) return;
+        const note = `${r0.admin_note ? `${r0.admin_note}\n` : ''}${SENT} طُلبت الموافقة ${new Date().toISOString().slice(0, 10)}`;
+        return rest(`listings?id=eq.${r0.id}`, { method: 'PATCH', body: { admin_note: note }, headers: rep, keepalive: true })
+          .then(([row]) => { upsertLocal(row); toast('سُجّلت «أُرسلت» ✓ — التراجع من «بانتظار الرد»'); again(); });
+      }).catch((err) => toast(errMsg(err), true));
       return;
     }
     const ms = e.target.closest('[data-sent]');
@@ -677,11 +864,12 @@ function viewPending(el, mode = 'req') {
     const rj = e.target.closest('[data-reject]');
     if (!ms && !ap && !rj) return;
     const id = Number((ms || ap || rj).dataset.sent || (ms || ap || rj).dataset.approve || (ms || ap || rj).dataset.reject);
-    const r = A.byId.get(id);
-    if (!r) return;
+    if (!A.byId.get(id)) return;
     try {
       let body;
       if (ms) {
+        const [r] = await freshRows([id]);
+        if (!r) throw new ApiError('لم تعد هذه البطاقة موجودة (ربما حُذفت)', 404);
         const note = r.admin_note || '';
         body = { admin_note: (isSent(r) ? note.split('\n').filter((l) => !l.includes(SENT)).join('\n').trim()
           : `${note ? `${note}\n` : ''}${SENT} طُلبت الموافقة ${new Date().toISOString().slice(0, 10)}`) || null };
@@ -849,6 +1037,7 @@ function viewListings(el) {
       if (!(await confirmBox(`حذف ${fmtNum(ids.length)} نشاطاً نهائياً؟ لا يمكن التراجع (يمكنك بدلاً من ذلك إخفاؤها).`, { ok: 'حذف نهائي', danger: true }))) return;
       try {
         await rest(`listings?id=in.(${ids.join(',')})`, { method: 'DELETE' });
+        ids.forEach((id) => A.gone.add(id));
         A.listings = A.listings.filter((r) => !A.selected.has(r.id));
         indexListings();
         A.selected.clear();
@@ -878,9 +1067,14 @@ function viewListings(el) {
 }
 
 // تعديل نشاط
-function editListing(id, preset = {}) {
+async function editListing(id, preset = {}) {
+  if (id && !A.fresh) { // تُحفظ الاستمارة كلها، فلا تُبنى على نسخة قديمة من البطاقة
+    const wait = openSheet('جارٍ الفتح…', '<p class="muted" style="margin:0">أجلب آخر نسخة من هذه البطاقة…</p>');
+    try { await freshRows([id]); } catch (err) { if (sheet && sheet.sh === wait) closeSheet(); toast(errMsg(err), true); return; }
+    if (!sheet || sheet.sh !== wait) return; // أُغلقت النافذة أثناء الانتظار
+  }
   const r = id ? A.byId.get(id) : { name: '', category_id: null, phones: [], tags: [], status: 'approved', featured: false, verified: false, no_whatsapp: false, ...preset };
-  if (!r) return;
+  if (!r) { closeSheet(); toast('لم تعد هذه البطاقة موجودة (ربما حُذفت)', true); return; }
   const phones = (r.phones && r.phones.length ? r.phones : ['']);
   const body = `<form class="form" id="edit-form" novalidate>
     <div class="form-grid two">
@@ -1040,8 +1234,9 @@ function mergeDialog(keepId) {
   sh.querySelector('#m-list').onclick = async (e) => {
     const b = e.target.closest('[data-m]');
     if (!b) return;
-    let drop = A.byId.get(Number(b.dataset.m));
-    let keep = A.byId.get(keepId); // الصف الحالي، لا النسخة الملتقطة عند فتح النافذة
+    let drop;
+    let keep; // آخر نسخة من البطاقتين، لا النسخة الملتقطة عند فتح النافذة
+    try { [keep, drop] = await freshRows([keepId, Number(b.dataset.m)]); } catch (err) { toast(errMsg(err), true); return; }
     if (!drop || !keep) { draw(); return; }
     // دمج مرشح/طلب في بطاقة منشورة يُبقي المنشورة دائماً حتى لا تختفي من الدليل
     if (keep.status !== 'approved' && drop.status === 'approved') [keep, drop] = [drop, keep];
@@ -1287,6 +1482,9 @@ function viewIO(el) {
   $('#ex-json').onclick = () => download(`dalil-hama-${stamp}.json`, JSON.stringify({ exported_at: new Date().toISOString(), categories: A.cats, areas: A.areas, settings: A.settings, listings: A.listings }, null, 1), 'application/json');
   const drop = $('#drop');
   const handle = async (file) => {
+    if (!A.fresh) { // فحص الأرقام الموجودة يكون على آخر نسخة
+      try { await syncNow(); } catch (err) { toast(`لا يمكن الاستيراد قبل جلب آخر التعديلات: ${errMsg(err)}`, true); return; }
+    }
     const rows = parseCsv(await file.text());
     const catByName = new Map(A.cats.map((c) => [normalize(c.name), c.id]));
     const other = A.cats.find((c) => c.name === 'أخرى');
@@ -1367,9 +1565,7 @@ function viewIO(el) {
           }
         }
         toast('تم الاستيراد ✓');
-        A.listings = await fetchAllListings();
-        indexListings();
-        refreshStats();
+        try { await syncNow({ again: true }); } catch { /* تبقى النسخة الحالية حتى الجلب القادم */ }
         viewIO(el);
       } catch (err) {
         toast(errMsg(err), true);
@@ -1424,6 +1620,7 @@ function viewSettings(el) {
     try {
       await rest('settings?on_conflict=key', { method: 'POST', body: { key, value, is_public: true }, headers: { Prefer: 'resolution=merge-duplicates,return=minimal' } });
       A.settings[key] = value;
+      persist();
       toast('تم الحفظ ✓ — يظهر للزوار خلال دقائق');
     } catch (err) { toast(errMsg(err), true); }
   };
