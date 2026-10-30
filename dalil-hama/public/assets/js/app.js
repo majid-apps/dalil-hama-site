@@ -112,7 +112,7 @@ function params() {
   };
 }
 
-const ROUTER_HASH = /^(add|report|addphone)(-\d+)?$/;
+const ROUTER_HASH = /^(add|report|addphone|owner)(-\d+)?$/;
 function routerHash(h) {
   const v = String(h || '').replace(/^#/, '');
   return ROUTER_HASH.test(v) ? v : '';
@@ -161,12 +161,13 @@ function sync() {
   $('#clear-q').hidden = !input.value;
   // النوافذ
   const want = p.l ? `item:${p.l}` : p.hash.startsWith('report') ? `report:${p.hash}` : p.hash.startsWith('addphone') ? `report:${p.hash}`
-    : p.hash === 'add' ? 'add' : '';
+    : p.hash.startsWith('owner') ? `owner:${p.hash}` : p.hash === 'add' ? 'add' : '';
   if (want !== (openSheetKey || '')) {
     if (openSheetKey) hideSheet();
     if (want && state.loaded) {
       if (p.l) openItem(p.l);
       else if (want === 'add') openAdd();
+      else if (p.hash.startsWith('owner')) openOwner(p.hash);
       else openReport(p.hash);
     }
   }
@@ -610,6 +611,7 @@ function openItem(id) {
       ${adminOn() ? `<a class="qa" href="/admin/#edit/${it.i}">${I('edit')}تعديل (إدارة)</a>` : ''}
     </div>
     <div class="owner-note">${I('edit')}<span style="flex:1">هل هذا نشاطك؟ حدّث بياناته أو أضف رقماً مجاناً.</span><button type="button" data-act="report" data-kind="wrong_info">طلب تعديل</button></div>
+    ${ownerEditOn() ? `<div class="owner-note">${I('verified')}<span style="flex:1">صاحب النشاط؟ عدّل بطاقتك أو احذفها بنفسك برمز يصل إلى واتساب.</span><button type="button" data-act="owner">تعديل بطاقتي</button></div>` : ''}
   </div>`;
   showSheet(`item:${id}`, cat ? `${cat.ic} ${esc(cat.n)}` : 'التفاصيل', body, { label: it.n });
   state.recent = [id, ...state.recent.filter((x) => x !== id)].slice(0, 12);
@@ -749,6 +751,152 @@ function openReport(hash) {
   });
 }
 
+// تعديل صاحب النشاط لبطاقته (رمز واتساب ← جلسة قصيرة ← تعديل أو حذف)
+const ownerEditOn = () => !!(state.settings.owner_edit && state.settings.owner_edit.enabled);
+const OWNER_ERR = {
+  disabled: 'الميزة غير متاحة حالياً.',
+  rate: 'محاولات كثيرة. حاول بعد ساعة.',
+  no_mobile: 'لا يوجد رقم جوال مسجّل لهذا النشاط لإرسال الرمز. أرسل لنا بلاغاً وسنعدّله لك.',
+  unavailable: 'هذا النشاط غير متاح.',
+  expired: 'انتهت صلاحية الرمز. اطلب رمزاً جديداً.',
+  locked: 'أخطأت عدة مرات. اطلب رمزاً جديداً.',
+  wrong: 'الرمز غير صحيح.',
+  session: 'انتهت الجلسة. ابدأ من جديد.',
+  dup: 'هذا الرقم مسجّل في نشاط آخر.',
+  phone: 'اكتب رقم جوال صحيحاً عليه واتساب (09…).',
+  phone_verify: 'يجب التحقق من الرقم الجديد أولاً.',
+  name: 'اكتب اسماً صحيحاً (حرفان على الأقل).',
+  website: 'رابط صفحة الويب غير صالح.',
+  map_url: 'رابط الخريطة غير صالح.',
+};
+
+function openOwner(hash) {
+  const lid = Number(hash.split('-')[1]) || 0;
+  const it = state.byId.get(lid);
+  if (!it || !ownerEditOn()) { closeSheet(); return; }
+  let token = '';
+  const sh = showSheet(`owner:${hash}`, 'تعديل بطاقتي', '');
+  const body = sh.querySelector('.sheet-body');
+  const msg = (res, fallback = 'تعذّر الاتصال. حاول مجدداً.') => (res ? OWNER_ERR[res.error] || 'تعذّر تنفيذ الطلب.' : fallback);
+  const bind = (sel, fn) => body.querySelector(sel)?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const form = e.currentTarget;
+    const err = form.querySelector('.form-error');
+    const btn = form.querySelector('[type=submit]');
+    btn.disabled = true;
+    err.hidden = true;
+    try {
+      const m = await fn(Object.fromEntries(new FormData(form)));
+      if (m) { err.textContent = m; err.hidden = false; btn.disabled = false; }
+    } catch {
+      err.textContent = msg(null); err.hidden = false; btn.disabled = false;
+    }
+  });
+  // خطوة إدخال رمز: send() يطلب الرمز، verify(code) يتحقق، onDone(res) بعد النجاح
+  const codeStep = (title, masked, { resend, verify, onDone }) => {
+    body.innerHTML = `<form class="form" id="own-code" novalidate>
+      <p style="margin:0;color:var(--ink-2)">${title} أرسلنا رمزاً من 6 أرقام إلى واتساب الرقم <b dir="ltr">${esc(masked)}</b>. صلاحيته 10 دقائق.</p>
+      <label class="field"><span>الرمز</span><input class="input" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" dir="ltr" style="text-align:center;letter-spacing:6px;font-size:22px" required></label>
+      <div class="form-error" hidden></div>
+      <button class="btn btn-primary btn-lg btn-block" type="submit">تأكيد</button>
+      <button class="btn btn-ghost btn-block" type="button" id="own-resend">لم يصلني الرمز — إعادة الإرسال</button>
+    </form>`;
+    body.querySelector('[name=code]').focus();
+    body.querySelector('#own-resend').addEventListener('click', async (e) => {
+      const b = e.currentTarget;
+      b.disabled = true;
+      const err = body.querySelector('.form-error');
+      try {
+        const r = await resend();
+        err.textContent = r.ok ? 'أُرسل رمز جديد.' : msg(r);
+        err.hidden = false;
+      } catch { err.textContent = msg(null); err.hidden = false; }
+      setTimeout(() => { b.disabled = false; }, 30000);
+    });
+    bind('#own-code', async (fd) => {
+      const r = await verify(String(fd.code || ''));
+      if (!r.ok) return msg(r) + (r.error === 'wrong' && r.left ? ` (متبقٍ ${r.left} محاولات)` : '');
+      return onDone(r);
+    });
+  };
+  const intro = () => {
+    body.innerHTML = `<div class="form"><p style="margin:0;color:var(--ink-2)">لتعديل بطاقة «${esc(it.n)}» أو حذفها نتأكد أنك صاحب الرقم: نرسل رمزاً إلى واتساب الرقم المسجّل في البطاقة.</p>
+      <div class="form-error" hidden></div>
+      <button class="btn btn-primary btn-lg btn-block" type="button" id="own-send">${I('wa', 'sm')}أرسل لي الرمز</button></div>`;
+    body.querySelector('#own-send').addEventListener('click', async (e) => {
+      const b = e.currentTarget;
+      const err = body.querySelector('.form-error');
+      b.disabled = true;
+      try {
+        const r = await rpc('owner_request_code', { lid });
+        if (!r.ok) { err.textContent = msg(r); err.hidden = false; b.disabled = false; return; }
+        codeStep('', r.masked, {
+          resend: () => rpc('owner_request_code', { lid }),
+          verify: (code) => rpc('owner_verify_code', { lid, code }),
+          onDone: (res) => { token = res.token; return editStep(); },
+        });
+      } catch { err.textContent = msg(null); err.hidden = false; b.disabled = false; }
+    });
+  };
+  const done = (title, text) => { body.innerHTML = successHtml(title, text); };
+  const editStep = async () => {
+    const cur = await rpc('owner_get', { lid, token });
+    if (!cur.ok) return msg(cur);
+    body.innerHTML = `<form class="form" id="own-form" novalidate>
+      <label class="field"><span>الاسم</span><input class="input" name="name" maxlength="160" required value="${esc(cur.name)}"></label>
+      <label class="field"><span>رقم الجوال <em>(تغييره يحتاج رمزاً على الرقم الجديد)</em></span><input class="input" name="phone" inputmode="tel" dir="ltr" value="${esc(cur.phone)}"></label>
+      <label class="field"><span>العنوان</span><input class="input" name="address" maxlength="400" value="${esc(cur.address)}"></label>
+      <label class="field"><span>صفحة الويب</span><input class="input" name="website" maxlength="300" dir="ltr" value="${esc(cur.website)}"></label>
+      <label class="field"><span>رابط الخريطة</span><input class="input" name="map_url" maxlength="1200" dir="ltr" value="${esc(cur.map_url)}"></label>
+      <div class="form-error" hidden></div>
+      <button class="btn btn-primary btn-lg btn-block" type="submit">${I('check', 'sm')}حفظ التعديلات</button>
+      <button class="btn btn-danger btn-block" type="button" id="own-del">${I('trash', 'sm')}حذف البطاقة نهائياً</button>
+    </form>`;
+    const save = async (fd) => {
+      const r = await rpc('owner_update', { lid, token, payload: fd });
+      if (!r.ok) return msg(r);
+      await loadData();
+      done('تم الحفظ ✅', r.changed ? 'حُدّثت بطاقتك وستظهر للجميع خلال لحظات.' : 'لم يتغيّر شيء.');
+      return '';
+    };
+    bind('#own-form', async (fd) => {
+      const np = normalizePhone(fd.phone);
+      if (np && np !== cur.phone) {
+        const r = await rpc('owner_request_code', { lid, new_phone: np, token });
+        if (!r.ok) return msg(r);
+        codeStep('للتأكد من الرقم الجديد،', r.masked, {
+          resend: () => rpc('owner_request_code', { lid, new_phone: np, token }),
+          verify: (code) => rpc('owner_verify_code', { lid, code, token }),
+          onDone: async () => {
+            const m = await save({ ...fd, phone: np });
+            if (m) { await editStep(); body.querySelector('.form-error').textContent = m; body.querySelector('.form-error').hidden = false; }
+            return '';
+          },
+        });
+        return '';
+      }
+      return save({ ...fd, phone: cur.phone });
+    });
+    body.querySelector('#own-del').addEventListener('click', (e) => {
+      const b = e.currentTarget;
+      if (!b.dataset.sure) {
+        b.dataset.sure = '1';
+        b.textContent = 'اضغط مرة ثانية للتأكيد — لا رجعة بعد الحذف';
+        return;
+      }
+      b.disabled = true;
+      rpc('owner_delete', { lid, token }).then(async (r) => {
+        const err = body.querySelector('.form-error');
+        if (!r.ok) { err.textContent = msg(r); err.hidden = false; b.disabled = false; return; }
+        await loadData();
+        done('تم الحذف', 'حُذفت البطاقة من الدليل نهائياً.');
+      }).catch(() => { b.disabled = false; });
+    });
+    return '';
+  };
+  intro();
+}
+
 // ─────────────── التفاعل ───────────────
 
 function toast(msg) {
@@ -854,6 +1002,7 @@ document.addEventListener('click', (e) => {
     go({ l: null, hash: it ? `report-${it.i}` : 'report' }, { keep: true, push: !history.state?.sheet });
     return;
   }
+  if (actName === 'owner' && it) { e.preventDefault(); go({ l: null, hash: `owner-${it.i}` }, { keep: true, push: !history.state?.sheet }); return; }
   if (actName === 'addphone') { e.preventDefault(); go({ l: null, hash: `addphone-${id}` }, { keep: true, push: !history.state?.sheet }); return; }
   if (actName === 'close') { e.preventDefault(); closeSheet(); return; }
   if (actName === 'back') {

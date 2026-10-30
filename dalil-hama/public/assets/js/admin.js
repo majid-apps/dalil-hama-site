@@ -1260,10 +1260,10 @@ function auditVal(v) {
   return String(v);
 }
 function auditItem(l) {
-  const who = l.user_id ? 'أنت' : 'النظام'; // الإدارة لمستخدم واحد
-  const act = { create: 'أضاف', update: 'عدّل', delete: 'حذف', import: 'استورد' }[l.action] || l.action;
+  const who = l.action.startsWith('owner_') ? 'صاحب النشاط' : l.user_id ? 'أنت' : 'النظام'; // الإدارة لمستخدم واحد
+  const act = { create: 'أضاف', update: 'عدّل', delete: 'حذف', import: 'استورد', owner_update: 'عدّل بطاقته', owner_delete: 'حذف بطاقته' }[l.action] || l.action;
   let chg = '';
-  if (l.action === 'update' && l.changes) {
+  if ((l.action === 'update' || l.action === 'owner_update') && l.changes) {
     chg = Object.entries(l.changes).map(([k, [a, b]]) => {
       const lab = FIELD_LABEL[k] || k;
       if (k === 'category_id') return `${lab}: <del>${esc(catName(a))}</del> ← <ins>${esc(catName(b))}</ins>`;

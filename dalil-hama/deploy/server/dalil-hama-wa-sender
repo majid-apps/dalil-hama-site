@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# دليل حماة — إرسال رموز التحقق لأصحاب الأنشطة عبر واتساب (Cloud API الرسمي من Meta)
+# يقرأ الصفوف الجديدة من private.wa_outbox (تكتبها دالة owner_request_code) ويرسلها، ثم يحذف الرمز من الجدول.
+#
+# التثبيت مرة واحدة على السيرفر:
+#   1) أنشئ ملف الإعدادات (وصلاحيته لك فقط):
+#        sudo install -m 600 /dev/null /etc/dalil-hama-site/wa.env
+#        sudoedit /etc/dalil-hama-site/wa.env      # الأسطر الثلاثة أدناه
+#          WA_TOKEN=...        رمز الوصول الدائم (System User) من Meta
+#          WA_PHONE_ID=...     معرّف رقم الإرسال (Phone number ID)
+#          WA_TEMPLATE=...     اسم قالب Authentication المعتمد (الافتراضي dalil_code)، لغته WA_LANG (الافتراضي ar)
+#   2) sudo bash dalil-hama-wa-sender install     يثبّت الخدمة dalil-hama-wa-sender
+#   3) افتح الميزة للزوار:
+#        sudo -u postgres psql -d dalil_hama -c "update public.settings set value='{\"enabled\":true}' where key='owner_edit'"
+# إغلاق الميزة فوراً: نفس الأمر مع false.   الحالة: journalctl -u dalil-hama-wa-sender -n 50
+# تجربة بلا إرسال حقيقي: WA_DRY_RUN=1 (يطبع الرسائل في السجل فقط).
+set -Eeuo pipefail
+
+ENV_FILE=${DH_WA_ENV:-/etc/dalil-hama-site/wa.env}
+PSQL=${DH_WA_PSQL:-sudo -u postgres psql -d dalil_hama}
+SELF_DST=/usr/local/sbin/dalil-hama-wa-sender
+
+if [ "${1:-}" = install ]; then
+  [ "$(id -u)" = 0 ] || { echo "شغّله بـ sudo" >&2; exit 1; }
+  install -m 755 "$0" "$SELF_DST"
+  cat > /etc/systemd/system/dalil-hama-wa-sender.service <<UNIT
+[Unit]
+Description=دليل حماة — إرسال رموز واتساب
+After=network-online.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+ExecStart=$SELF_DST
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable --now dalil-hama-wa-sender
+  echo "✓ الخدمة تعمل. السجل: journalctl -u dalil-hama-wa-sender -n 50"
+  exit 0
+fi
+
+# shellcheck disable=SC1090
+[ -f "$ENV_FILE" ] && . "$ENV_FILE"
+WA_DRY_RUN=${WA_DRY_RUN:-0}
+WA_TEMPLATE=${WA_TEMPLATE:-dalil_code}
+WA_LANG=${WA_LANG:-ar}
+if [ "$WA_DRY_RUN" != 1 ] && { [ -z "${WA_TOKEN:-}" ] || [ -z "${WA_PHONE_ID:-}" ]; }; then
+  echo "WA_TOKEN وWA_PHONE_ID مطلوبان في $ENV_FILE" >&2
+  exit 1
+fi
+
+# $PSQL كلمتان أو أكثر عمداً
+q() { $PSQL -X -At -F $'\t' -v ON_ERROR_STOP=1 -c "$1"; }
+
+send() { # $1 رقم دولي أرقام فقط، $2 الرمز أرقام فقط
+  local body
+  body=$(printf '{"messaging_product":"whatsapp","to":"%s","type":"template","template":{"name":"%s","language":{"code":"%s"},"components":[{"type":"body","parameters":[{"type":"text","text":"%s"}]},{"type":"button","sub_type":"url","index":"0","parameters":[{"type":"text","text":"%s"}]}]}}' \
+    "$1" "$WA_TEMPLATE" "$WA_LANG" "$2" "$2")
+  if [ "$WA_DRY_RUN" = 1 ]; then echo "dry-run: إلى $1 (الرمز لا يُطبع)"; return 0; fi
+  curl -fsS --max-time 15 -o /dev/null -H "Authorization: Bearer $WA_TOKEN" -H 'Content-Type: application/json' \
+    -d "$body" "https://graph.facebook.com/v21.0/$WA_PHONE_ID/messages"
+}
+
+echo "dalil-hama-wa-sender: يعمل (dry-run=$WA_DRY_RUN)"
+while true; do
+  # أي رمز أقدم من 10 دقائق انتهت صلاحيته فلا يُرسل
+  rows=$(q "update private.wa_outbox set sent_at = now() where id in (
+              select id from private.wa_outbox where sent_at is null and created_at > now() - interval '10 minutes'
+              order by id for update skip locked limit 10) returning id, to_phone, code" || true)
+  if [ -z "$rows" ]; then sleep 2; continue; fi
+  while IFS=$'\t' read -r id to code; do
+    [[ "$id" =~ ^[0-9]+$ && "$to" =~ ^[0-9]{8,15}$ && "$code" =~ ^[0-9]{6}$ ]] || continue
+    if err=$(send "$to" "$code" 2>&1); then
+      q "delete from private.wa_outbox where id = $id" >/dev/null || true
+      echo "أُرسل #$id"
+    else
+      echo "فشل #$id: ${err:0:200}" >&2
+      q "update private.wa_outbox set code = '', error = 'send failed' where id = $id" >/dev/null || true
+    fi
+  done <<< "$rows"
+done
