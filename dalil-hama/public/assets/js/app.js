@@ -700,6 +700,7 @@ function openReport(hash) {
   const body = `<form class="form" id="report-form" novalidate>
     <p style="margin:0;color:var(--ink-2)">${addPhone ? 'شكراً لمساعدتك! اكتب الرقم الصحيح وسنضيفه بعد التحقق.' : 'ساعدنا في إبقاء الدليل دقيقاً. نراجع كل بلاغ ونصحّح البيانات بسرعة.'}</p>
     <div class="field"><span>النشاط المعني</span><div id="pick-box"></div></div>
+    <div id="own-box"></div>
     <fieldset class="field" style="border:0;padding:0;margin:0"><legend style="font-size:14px;font-weight:700;margin-bottom:6px">نوع البلاغ</legend>
       <div class="kinds">${REPORT_KINDS.map(([k, l]) => `<label><input type="radio" name="kind" value="${k}"${k === defKind ? ' checked' : ''}><span>${l}</span></label>`).join('')}</div></fieldset>
     <label class="field"><span>التفاصيل</span><textarea class="input" name="details" maxlength="1000" placeholder="${addPhone ? 'الرقم الصحيح هو: 09…' : 'ما الخطأ؟ وما المعلومة الصحيحة إن كنت تعرفها؟'}"></textarea></label>
@@ -710,7 +711,7 @@ function openReport(hash) {
   </form>`;
   const sh = showSheet(`report:${hash}`, addPhone ? 'أضف رقماً لهذا النشاط' : 'الإبلاغ عن خطأ', body);
   const box = sh.querySelector('#pick-box');
-  const drawPick = () => {
+  let drawPick = () => {
     const it = picked && state.byId.get(picked);
     if (it) {
       box.innerHTML = `<div class="pick"><span class="avatar" style="width:38px;height:38px;font-size:19px;border-radius:12px;--hue:${catHue(catOf(it))}">${catOf(it)?.ic || '📍'}</span><b>${esc(it.n)}</b><button class="btn btn-ghost" type="button" data-act="unpick" style="min-height:36px;padding:0 10px">تغيير</button></div>`;
@@ -724,6 +725,18 @@ function openReport(hash) {
       });
     }
   };
+  const ownBox = sh.querySelector('#own-box');
+  const drawOwn = () => {
+    const it = picked && state.byId.get(picked);
+    ownBox.innerHTML = it && ownerEditOn() && !addPhone
+      ? `<div class="owner-note">${I('verified')}<span style="flex:1">هل أنت صاحب هذا الرقم؟ تحقّق برمز يصل إلى واتساب ثم عدّل بطاقتك أو احذفها بنفسك.</span><button type="button" id="own-go">أنا صاحب الرقم</button></div>`
+      : '';
+  };
+  ownBox.addEventListener('click', (e) => {
+    if (e.target.closest('#own-go') && picked) go({ l: null, hash: `owner-${picked}` }, { keep: true, push: !history.state?.sheet });
+  });
+  const drawPick0 = drawPick;
+  drawPick = () => { drawPick0(); drawOwn(); };
   drawPick();
   box.addEventListener('click', (e) => {
     const b = e.target.closest('[data-pick]');
