@@ -990,11 +990,9 @@ async function excludeListing(r, after) {
   if (!(r.phones || []).length) { toast('لا رقم في هذه البطاقة لاستبعاده', true); return; }
   const ph = await pickPhone(r);
   if (!ph) return;
-  const keeps = r.phones.length > 1 || r.lat || safeUrl(r.map_url) || (r.address || '').trim();
-  if (!(await confirmBox(`استبعاد <b dir="ltr">${esc(formatPhone(ph))}</b> نهائياً؟ يُحذف هذا الرقم فقط من بطاقة «${esc(r.name)}» ومن أي بطاقة أخرى تحمله، ولا يظهر ولا يُقبل من الزوار أو الاستيراد إلا بعد إزالته من «الأرقام المستبعدة».${keeps ? ' تبقى البطاقة منشورة بما فيها من أرقام وموقع وعنوان.' : ' لن يبقى في البطاقة رقم ولا موقع ولا عنوان فتُرفض.'}`, { ok: 'استبعاد نهائي', danger: true }))) return;
   try {
     await excludePhones([ph], r.name);
-    toast('استُبعد الرقم وحُفظ في القائمة ✓');
+    toast('استُبعد الرقم وحُفظ في القائمة ✓ — لن يظهر ثانية');
     if (after) after();
   } catch (err) { toast(errMsg(err), true); }
 }
