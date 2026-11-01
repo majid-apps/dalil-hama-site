@@ -18,7 +18,7 @@
 - عند تغيير js/css ارفع `?v=` في `index.html` و`admin/index.html` ورقم `VERSION` في `sw.js`. لا سكربتات مضمّنة في HTML. لا تغيّر `assets/js/config.js`.
 
 ## الإصدارات
-- `main` = ما يعمل على الموقع الحي. كل إصدار معتمد يُحفظ كفرع `release/vX.Y.Z` (رفع الوسوم tags مرفوض من جلسات Claude). الحالي: `release/v1.0.0`. الرجوع على السيرفر: `sudo dalil-hama-site previous`.
+- `main` = ما يعمل على الموقع الحي. كل إصدار معتمد يُحفظ كفرع `release/vX.Y.Z` (رفع الوسوم tags مرفوض من جلسات Claude). الحالي: `release/v1.1.0` (السابق `release/v1.0.0`). الرجوع على السيرفر: `sudo dalil-hama-site previous`.
 - بعد كل إصدار حدّث جدول الإصدارات في `docs/HANDBOOK.md`.
 - قبل أي إصدار: افحص في متصفح (Playwright موجود) بحجم جوال، ولا تختبر الكتابة على الموقع الحي (اعترض `track` و`log_search` و`submit_*`).
 
