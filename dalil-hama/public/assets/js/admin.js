@@ -417,9 +417,10 @@ async function start() {
   // فتح فوري من النسخة المؤقتة إن وُجدت، والتحديث من الخادم يجري في الخلفية
   const cached = await cache.read();
   const fresh = (async () => {
-    A.me = await rpc('admin_me');
+    // الهوية والبيانات بالتوازي (كانت متتابعة فتضيف زمن اتصال كاملاً عند كل فتح)
+    const [me] = await Promise.all([rpc('admin_me'), loadAll(cached && cached.listings)]);
+    A.me = me;
     if (!A.me) { dropSession(); return renderLogin('هذا الحساب لا يملك صلاحية الإدارة.'); }
-    await loadAll(cached && cached.listings);
     cache.later();
   })();
   if (cached && cached.me) {
@@ -964,31 +965,51 @@ function viewPending(el, mode = 'req') {
         body = { admin_note: (isSent(r) ? note.split('\n').filter((l) => !l.includes(SENT)).join('\n').trim()
           : `${note ? `${note}\n` : ''}${SENT} طُلبت الموافقة ${new Date().toISOString().slice(0, 10)}`) || null };
       } else body = { status: ap ? 'approved' : 'rejected' };
-      const [row] = await rest(`listings?id=eq.${id}`, { method: 'PATCH', body, headers: rep });
-      upsertLocal(row);
-      toast(ms ? (isSent(row) ? 'سُجّل التواصل ✓ — انتقل إلى «بانتظار الرد»' : 'أُلغيت علامة التواصل') : ap ? 'تم النشر ✓' : (cand ? 'تم الاستبعاد' : 'تم الرفض'));
-      if (!ms) refreshStats();
+      // تنفيذ فوري على الشاشة ثم المزامنة مع الخادم في الخلفية (يُعاد الوضع السابق عند الفشل)
+      const local = { ...r, ...body };
+      upsertLocal(local);
+      toast(ms ? (isSent(local) ? 'سُجّل التواصل ✓ — انتقل إلى «بانتظار الرد»' : 'أُلغيت علامة التواصل') : ap ? 'تم النشر ✓' : (cand ? 'تم الاستبعاد' : 'تم الرفض'));
       again();
+      rest(`listings?id=eq.${id}`, { method: 'PATCH', body, headers: rep })
+        .then(([row]) => { upsertLocal(row); if (!ms) refreshStats(); })
+        .catch((err) => { upsertLocal(r); toast(`لم يُحفظ: ${errMsg(err)}`, true); again(); });
     } catch (err) { toast(errMsg(err), true); }
   };
 }
 
 // ─────────────── الأرقام المستبعدة نهائياً ───────────────
 
-/** يحفظ الأرقام في قائمة الاستبعاد (لا تُنشر ولا تُستورد ثانية إلا بأمرك) ويحذف كلاً منها من بطاقاتها؛ تُرفض البطاقة فقط إن لم يبقَ فيها رقم ولا موقع ولا عنوان */
-async function excludePhones(phones, note = null) {
+/** يحفظ الأرقام في قائمة الاستبعاد (لا تُنشر ولا تُستورد ثانية إلا بأمرك) ويحذف كلاً منها من بطاقاتها؛ تُرفض البطاقة فقط إن لم يبقَ فيها رقم ولا موقع ولا عنوان.
+ *  يُطبَّق فوراً على الشاشة، ويعيد `done` للمزامنة مع الخادم في الخلفية (تُعاد الحالة السابقة عند الفشل) */
+function excludePhones(phones, note = null) {
   const list = [...new Set(phones.map(normalizePhone).filter(Boolean))];
   if (!list.length) throw new Error('لا يوجد رقم صالح');
-  const ids = await rpc('admin_exclude', { p_phones: list, p_note: note });
-  const [rows, ex] = await Promise.all([
-    ids && ids.length ? rest(`listings?select=*&id=in.(${ids.join(',')})`) : [],
-    rest('excluded_phones?select=*&order=created_at.desc'),
-  ]);
-  upsertMany(rows);
-  setExcluded(ex);
-  refreshStats();
-  cache.later();
-  return list.length;
+  const orig = A.listings.filter((r) => (r.phones || []).some((p) => list.includes(p)));
+  const prevEx = A.excluded;
+  const stamp = new Date().toISOString();
+  setExcluded([...list.filter((p) => !A.exSet.has(p)).map((p) => ({ phone: p, name: (orig.find((r) => r.phones.includes(p)) || {}).name || null, note, created_at: stamp })), ...A.excluded]);
+  upsertMany(orig.map((r) => {
+    const left = r.phones.filter((p) => !list.includes(p));
+    const empty = !left.length && !r.lat && !safeUrl(r.map_url) && !(r.address || '').trim();
+    return { ...r, phones: left, status: empty && r.status !== 'rejected' ? 'rejected' : r.status };
+  }));
+  const done = (async () => {
+    try {
+      const ids = await rpc('admin_exclude', { p_phones: list, p_note: note });
+      const [rows, ex] = await Promise.all([
+        ids && ids.length ? rest(`listings?select=*&id=in.(${ids.join(',')})`) : [],
+        rest('excluded_phones?select=*&order=created_at.desc'),
+      ]);
+      upsertMany(rows);
+      setExcluded(ex);
+      refreshStats();
+    } catch (e) {
+      upsertMany(orig);
+      setExcluded(prevEx);
+      throw e;
+    }
+  })();
+  return { count: list.length, done };
 }
 
 /** اختيار رقم واحد من بطاقة فيها عدة أرقام */
@@ -1006,9 +1027,10 @@ async function excludeListing(r, after) {
   const ph = await pickPhone(r);
   if (!ph) return;
   try {
-    await excludePhones([ph], r.name);
+    const { done } = excludePhones([ph], r.name);
     toast('استُبعد الرقم وحُفظ في القائمة ✓ — لن يظهر ثانية');
     if (after) after();
+    done.catch((err) => { toast(`لم يُحفظ الاستبعاد: ${errMsg(err)}`, true); if (after) after(); });
   } catch (err) { toast(errMsg(err), true); }
 }
 
@@ -1035,12 +1057,13 @@ function viewExcluded(el) {
     const fd = new FormData(e.target);
     const phones = String(fd.get('phones')).split(/[\n،,;]+/).map((t) => t.trim()).filter(Boolean);
     const btn = e.target.querySelector('[type=submit]');
-    btn.disabled = true;
     try {
-      const n = await excludePhones(phones, String(fd.get('note') || '').trim() || null);
-      toast(`استُبعد ${fmtNum(n)} رقم ✓`);
+      const { count, done } = excludePhones(phones, String(fd.get('note') || '').trim() || null);
+      toast(`استُبعد ${fmtNum(count)} رقم ✓`);
       renderNavCounts();
       viewExcluded(el);
+      done.then(() => { if (el.isConnected && $('#ex-form', el)) viewExcluded(el); renderNavCounts(); })
+        .catch((err) => { toast(`لم يُحفظ الاستبعاد: ${errMsg(err)}`, true); if (el.isConnected) viewExcluded(el); });
     } catch (err) { toast(errMsg(err), true); btn.disabled = false; }
   });
   el.onclick = async (e) => {
