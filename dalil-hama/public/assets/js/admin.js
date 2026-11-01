@@ -104,7 +104,7 @@ const rep = { Prefer: 'return=representation' };
 // ─────────────── الحالة ───────────────
 
 const A = {
-  me: null, listings: [], byId: new Map(), cats: [], catById: new Map(), areas: [], settings: {}, stats: null, reports: [], admins: [], inboxTab: 'req', candTab: 'todo', candQ: '', candSel: new Set(), idxDirty: false, pendLimit: {},
+  me: null, listings: [], byId: new Map(), cats: [], catById: new Map(), areas: [], settings: {}, stats: null, reports: [], excluded: [], exSet: new Set(), admins: [], inboxTab: 'req', candTab: 'todo', candQ: '', candSel: new Set(), idxDirty: false, pendLimit: {},
   index: new SearchIndex(), f: { q: '', cat: '', status: 'approved', flag: '', area: '', sort: 'new' }, selected: new Set(), page: 0, reportTab: 'open',
 };
 
@@ -167,10 +167,16 @@ const cache = {
     } catch { return null; }
   },
   read: () => cache.run('readonly', (st) => st.get('data')),
-  save: () => A.me && cache.run('readwrite', (st) => st.put({ listings: A.listings, cats: A.cats, areas: A.areas, settings: A.settings, stats: A.stats, reports: A.reports, me: A.me }, 'data')),
+  save: () => A.me && cache.run('readwrite', (st) => st.put({ listings: A.listings, cats: A.cats, areas: A.areas, settings: A.settings, stats: A.stats, reports: A.reports, excluded: A.excluded, me: A.me }, 'data')),
   clear: () => cache.run('readwrite', (st) => st.delete('data')),
 };
 function dropSession() { auth.clear(); cache.clear(); }
+
+function setExcluded(rows) {
+  A.excluded = rows;
+  A.exSet = new Set(rows.map((x) => x.phone));
+}
+const isExcluded = (r) => (r.phones || []).some((p) => A.exSet.has(p));
 
 function applyData(d) {
   A.listings = d.listings;
@@ -180,6 +186,7 @@ function applyData(d) {
   A.settings = d.settings;
   A.stats = d.stats;
   A.reports = d.reports;
+  setExcluded(d.excluded || []);
   indexListings();
 }
 
@@ -199,16 +206,17 @@ async function loadListings(base, total) {
 }
 
 async function loadAll(base) {
-  const [cats, areas, settings, stats, reports] = await Promise.all([
+  const [cats, areas, settings, stats, reports, excluded] = await Promise.all([
     rest('categories?select=*&order=sort.asc,name.asc'),
     rest('areas?select=*&order=sort.asc,name.asc'),
     rest('settings?select=*'),
     rpc('admin_stats'),
     rest('reports?select=*&order=created_at.desc&limit=300'),
+    rest('excluded_phones?select=*&order=created_at.desc').catch(() => []), // قبل تثبيت migration 0008
   ]);
   const total = ['approved', 'pending', 'hidden', 'rejected'].reduce((n, k) => n + (Number(stats && stats[k]) || 0), 0);
   const listings = await loadListings(base, total);
-  applyData({ listings, cats, areas, settings: Object.fromEntries(settings.map((s) => [s.key, s.value])), stats, reports });
+  applyData({ listings, cats, areas, settings: Object.fromEntries(settings.map((s) => [s.key, s.value])), stats, reports, excluded });
 }
 
 async function refreshStats() {
@@ -277,6 +285,7 @@ const VIEWS = [
   ['cats', 'التصنيفات', 'grid'],
   ['areas', 'الأحياء', 'pin'],
   ['io', 'استيراد وتصدير', 'download'],
+  ['excl', 'الأرقام المستبعدة', 'x'],
   ['log', 'سجل التعديلات', 'history'],
   ['settings', 'الإعدادات', 'settings'],
 ];
@@ -289,7 +298,7 @@ const TABS = [
   ['listings', 'البرنامج العام', 'list'],
   ['preview', 'المعاينة', 'eye'],
 ];
-const TAB_OF = { quality: 'dash', cats: 'dash', areas: 'dash', io: 'dash', log: 'dash', settings: 'dash' };
+const TAB_OF = { quality: 'dash', cats: 'dash', areas: 'dash', io: 'dash', excl: 'dash', log: 'dash', settings: 'dash' };
 const ALIAS = { pending: ['inbox', 'req'], reports: ['inbox', 'rep'] };
 
 function renderShell() {
@@ -373,7 +382,7 @@ function route() {
   $$('#tabbar a').forEach((a) => (a.dataset.tab === tab ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current')));
   $('#title').textContent = def[1];
   $('#bar-actions').innerHTML = '';
-  const fn = { dash: viewDash, cands: viewCands, inbox: viewInbox, listings: viewListings, quality: viewQuality, cats: viewCats, areas: viewAreas, io: viewIO, log: viewLog, settings: viewSettings }[def[0]];
+  const fn = { dash: viewDash, cands: viewCands, inbox: viewInbox, listings: viewListings, quality: viewQuality, cats: viewCats, areas: viewAreas, io: viewIO, excl: viewExcluded, log: viewLog, settings: viewSettings }[def[0]];
   window.scrollTo(0, 0);
   fn($('#content'));
   if (dl) {
@@ -932,6 +941,7 @@ function viewPending(el, mode = 'req') {
     const id = Number((ms || ap || rj).dataset.sent || (ms || ap || rj).dataset.approve || (ms || ap || rj).dataset.reject);
     const r = A.byId.get(id);
     if (!r) return;
+    if (rj && cand && (r.phones || []).length) { excludeListing(r, again); return; }
     try {
       let body;
       if (ms) {
@@ -944,6 +954,74 @@ function viewPending(el, mode = 'req') {
       toast(ms ? (isSent(row) ? 'سُجّل التواصل ✓ — انتقل إلى «بانتظار الرد»' : 'أُلغيت علامة التواصل') : ap ? 'تم النشر ✓' : (cand ? 'تم الاستبعاد' : 'تم الرفض'));
       if (!ms) refreshStats();
       again();
+    } catch (err) { toast(errMsg(err), true); }
+  };
+}
+
+// ─────────────── الأرقام المستبعدة نهائياً ───────────────
+
+/** يحفظ الأرقام في قائمة الاستبعاد (لا تُنشر ولا تُستورد ثانية إلا بأمرك) ويرفض بطاقاتها، ثم يحدّث الشاشة محلياً */
+async function excludePhones(phones, note = null) {
+  const list = [...new Set(phones.map(normalizePhone).filter(Boolean))];
+  if (!list.length) throw new Error('لا يوجد رقم صالح');
+  await rpc('admin_exclude', { p_phones: list, p_note: note });
+  const [rows, ex] = await Promise.all([
+    rest(`listings?select=*&phones=ov.{${list.map((p) => `"${p}"`).join(',')}}`),
+    rest('excluded_phones?select=*&order=created_at.desc'),
+  ]);
+  upsertMany(rows);
+  setExcluded(ex);
+  refreshStats();
+  cache.save();
+  return list.length;
+}
+
+async function excludeListing(r, after) {
+  if (!(r.phones || []).length) { toast('لا رقم في هذه البطاقة لاستبعاده', true); return; }
+  const ph = r.phones.map((p) => `<b dir="ltr">${esc(formatPhone(p))}</b>`).join(' / ');
+  if (!(await confirmBox(`استبعاد ${ph} نهائياً؟ تُرفض بطاقة «${esc(r.name)}» ولا يظهر الرقم ولا يُقبل من الزوار أو الاستيراد إلا بعد إزالته من «الأرقام المستبعدة».`, { ok: 'استبعاد نهائي', danger: true }))) return;
+  try {
+    await excludePhones(r.phones, r.name);
+    toast('استُبعد الرقم وحُفظ في القائمة ✓');
+    if (after) after();
+  } catch (err) { toast(errMsg(err), true); }
+}
+
+function viewExcluded(el) {
+  const rows = A.excluded;
+  el.innerHTML = `<div class="warnbox" style="margin-bottom:12px">${I('info', 'sm')}الأرقام هنا لا تُنشر ولا تُقبل من الزوار أو الاستيراد أبداً، إلا إذا أزلتها من القائمة بنفسك.</div>
+    <form class="panel form" id="ex-form" style="margin-top:0"><h2>${I('x')}استبعاد رقم</h2>
+      <label class="field"><span>الرقم <em>(أي صيغة، مثل +963 960 912 185)</em></span><textarea class="input" name="phones" dir="ltr" rows="2" placeholder="يمكن كتابة أكثر من رقم، كل رقم في سطر" required></textarea></label>
+      <label class="field"><span>ملاحظة <em>(اختياري)</em></span><input class="input" name="note" maxlength="300"></label>
+      <button class="btn btn-danger" type="submit">${I('x', 'sm')}استبعاد نهائي</button></form>
+    <div class="panel"><h2>${I('list')}القائمة (${fmtNum(rows.length)})</h2>
+      ${rows.length ? rows.map((x) => `<div class="row"><span class="avatar" style="width:40px;height:40px;font-size:20px;border-radius:12px">⛔</span>
+        <div style="min-width:0"><div class="nm"><bdi dir="ltr">${esc(formatPhone(x.phone))}</bdi></div><div class="sub"><span>${esc(x.name || 'بلا بطاقة')}</span>${x.note ? `<span>${esc(x.note)}</span>` : ''}<span>${timeAgo(x.created_at)}</span></div></div>
+        <div class="ops"><button class="btn btn-soft" type="button" data-unex="${esc(x.phone)}">إعادة السماح</button></div></div>`).join('') : '<div class="empty"><p>لا أرقام مستبعدة.</p></div>'}</div>`;
+  $('#ex-form', el).addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const phones = String(fd.get('phones')).split(/[\n،,;]+/).map((t) => t.trim()).filter(Boolean);
+    const btn = e.target.querySelector('[type=submit]');
+    btn.disabled = true;
+    try {
+      const n = await excludePhones(phones, String(fd.get('note') || '').trim() || null);
+      toast(`استُبعد ${fmtNum(n)} رقم ✓`);
+      renderNavCounts();
+      viewExcluded(el);
+    } catch (err) { toast(errMsg(err), true); btn.disabled = false; }
+  });
+  el.onclick = async (e) => {
+    const b = e.target.closest('[data-unex]');
+    if (!b) return;
+    const ph = b.dataset.unex;
+    if (!(await confirmBox(`إعادة السماح بالرقم <b dir="ltr">${esc(formatPhone(ph))}</b>؟ سيمكن نشره واستيراده من جديد (البطاقة المرفوضة تبقى مرفوضة حتى تنشرها بنفسك).`, { ok: 'إعادة السماح' }))) return;
+    try {
+      await rest(`excluded_phones?phone=eq.${encodeURIComponent(ph)}`, { method: 'DELETE' });
+      setExcluded(A.excluded.filter((x) => x.phone !== ph));
+      cache.save();
+      toast('أُعيد السماح بالرقم');
+      viewExcluded(el);
     } catch (err) { toast(errMsg(err), true); }
   };
 }
@@ -1163,7 +1241,7 @@ function editListing(id, preset = {}) {
     ${id ? `<details><summary class="muted" style="cursor:pointer">سجل التعديلات على هذا النشاط</summary><ul class="audit mt" id="audit"><li class="muted">جارٍ التحميل…</li></ul></details>` : ''}
     <div class="form-foot">
       <button class="btn btn-primary" type="submit">${I('check', 'sm')}حفظ</button>
-      ${id ? `<a class="btn btn-soft" href="/?l=${id}" target="_blank">${I('eye', 'sm')}عرض</a><button class="btn btn-soft" type="button" id="merge-btn">${I('merge', 'sm')}دمج</button><button class="btn btn-danger" type="button" id="del-btn" aria-label="حذف">${I('trash', 'sm')}</button>` : ''}
+      ${id ? `<a class="btn btn-soft" href="/?l=${id}" target="_blank">${I('eye', 'sm')}عرض</a><button class="btn btn-soft" type="button" id="merge-btn">${I('merge', 'sm')}دمج</button>${(r.phones || []).length ? `<button class="btn btn-soft" type="button" id="excl-btn">${I('x', 'sm')}استبعاد نهائي</button>` : ''}<button class="btn btn-danger" type="button" id="del-btn" aria-label="حذف">${I('trash', 'sm')}</button>` : ''}
     </div>
   </form>`;
   const sh = openSheet(id ? `تعديل: ${esc(r.name)}` : 'نشاط جديد', body);
@@ -1185,6 +1263,8 @@ function editListing(id, preset = {}) {
       const box = sh.querySelector('#audit');
       if (box) box.innerHTML = logs.length ? logs.map(auditItem).join('') : '<li class="muted">لا توجد تعديلات مسجلة.</li>';
     }).catch(() => {});
+    const exb = sh.querySelector('#excl-btn');
+    if (exb) exb.onclick = () => excludeListing(r, () => { closeSheet(); route(); });
     sh.querySelector('#del-btn').onclick = async () => {
       if (!(await confirmBox(`حذف «${esc(r.name)}» نهائياً؟ يمكنك بدلاً من ذلك تغيير حالته إلى «مخفي».`, { ok: 'حذف نهائي', danger: true }))) return;
       try { await rest(`listings?id=eq.${id}`, { method: 'DELETE' }); removeLocal(id); closeSheet(); toast('تم الحذف'); refreshStats(); route(); } catch (err) { toast(errMsg(err), true); }
@@ -1585,10 +1665,15 @@ function viewIO(el) {
     const skipped = rows.filter((r) => 'الرقم' in r && A.byId.has(Number(r['المعرف']))).length;
     const updates = mapped.filter((o) => o.id && A.byId.has(o.id));
     let inserts = mapped.filter((o) => !(o.id && A.byId.has(o.id)));
+    // الأرقام المستبعدة نهائياً لا تُستورد أبداً (لا إضافة ولا تحديث)
+    const exBlocked = (o) => (o.phones || []).some((p) => A.exSet.has(p));
+    const exCount = inserts.filter(exBlocked).length + updates.filter(exBlocked).length;
+    inserts = inserts.filter((o) => !exBlocked(o));
+    for (let i = updates.length - 1; i >= 0; i--) if (exBlocked(updates[i])) updates.splice(i, 1);
     // الجديد الذي يحمل رقماً موجوداً مسبقاً (منشوراً أو معلّقاً أو مخفياً) يُتجاهل افتراضياً
     const have = new Set(A.listings.filter((x) => x.status !== 'rejected').flatMap((x) => x.phones || []));
     const dupIns = inserts.filter((o) => (o.phones || []).some((p) => have.has(p)));
-    $('#import-preview').innerHTML = `<div class="warnbox mt">${I('info', 'sm')}الملف يحتوي ${fmtNum(mapped.length + skipped)} نشاطاً: ${fmtNum(updates.length)} للتحديث و${fmtNum(inserts.length)} جديد${skipped ? `، و${fmtNum(skipped)} موجود مسبقاً في الدليل سيُتجاهل (ملف الدليل القديم لا يُحدِّث البيانات المنظّفة)` : ''}.</div>
+    $('#import-preview').innerHTML = `<div class="warnbox mt">${I('info', 'sm')}الملف يحتوي ${fmtNum(mapped.length + skipped)} نشاطاً: ${fmtNum(updates.length)} للتحديث و${fmtNum(inserts.length)} جديد${exCount ? `، وتُجاهل ${fmtNum(exCount)} رقمها في «الأرقام المستبعدة»` : ''}${skipped ? `، و${fmtNum(skipped)} موجود مسبقاً في الدليل سيُتجاهل (ملف الدليل القديم لا يُحدِّث البيانات المنظّفة)` : ''}.</div>
       <label class="toggles mt" style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="imp-cand"${rows.some((r) => 'الحالة' in r) ? '' : ' checked'}> استيرادهم كـ«مرشحين» للمراجعة (لا يُنشرون حتى توافق عليهم)</label>
       ${dupIns.length ? `<label class="toggles mt" style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="imp-skipdup" checked> تجاهل ${fmtNum(dupIns.length)} جديداً رقمه موجود مسبقاً في الدليل</label>` : ''}
       <div class="toolbar mt"><button class="btn btn-primary" id="do-import">${I('upload', 'sm')}تنفيذ الاستيراد</button></div>`;
