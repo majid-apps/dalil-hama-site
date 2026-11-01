@@ -1,10 +1,14 @@
 // عامل الخدمة: يجعل الدليل يعمل بسرعة وحتى دون إنترنت بعد أول زيارة.
-const VERSION = 'dh-v12';
+const VERSION = 'dh-v13';
 const SHELL = [
   '/',
-  '/assets/css/app.css?v=4',
+  '/assets/css/app.css?v=5',
   '/assets/js/theme.js?v=3',
-  '/assets/js/app.js?v=4',
+  '/assets/js/app.js?v=5',
+  // لوحة الإدارة تُحفظ على الجوال لتفتح فوراً (التحديث في الخلفية)؛ اجعل أرقام ?v= هنا مطابقة لـ admin/index.html
+  '/admin/',
+  '/assets/css/admin.css?v=5',
+  '/assets/js/admin.js?v=14',
   '/assets/js/core.js',
   '/assets/js/search.js',
   '/assets/js/config.js',
@@ -33,7 +37,17 @@ self.addEventListener('fetch', (e) => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   if (url.origin !== location.origin) return;
+
+  // لوحة الإدارة: تُعرض النسخة المحفوظة فوراً ثم تُحدَّث في الخلفية (تظهر النسخة الجديدة عند الفتح التالي)
+  if (url.pathname === '/admin' || url.pathname === '/admin/' || url.pathname === '/admin/index.html') {
+    e.respondWith(staleWhileRevalidate(req, '/admin/'));
+    return;
+  }
   if (url.pathname.startsWith('/admin')) return;
+  if (OWN.test(url.pathname) && /\.(?:js|css)$/.test(url.pathname)) {
+    e.respondWith(fromAdmin(e).then((yes) => (yes ? staleWhileRevalidate(req) : networkFirst(req))));
+    return;
+  }
 
   // الصفحات: الشبكة أولاً ثم النسخة المحفوظة
   if (req.mode === 'navigate') {
@@ -57,22 +71,6 @@ self.addEventListener('fetch', (e) => {
   // (مثل /api/ إن أُعيد الموقع القديم يوماً) يذهب إلى الشبكة مباشرة دون تخزين
   if (!OWN.test(url.pathname)) return;
 
-  // السكربتات والأنماط: الشبكة أولاً حتى لا تختلط وحدات JS قديمة بجديدة بعد كل تحديث
-  if (/\.(?:js|css)$/.test(url.pathname)) {
-    e.respondWith(
-      fetch(req)
-        .then((res) => {
-          if (res.ok) {
-            const copy = res.clone();
-            caches.open(VERSION).then((c) => c.put(req, copy));
-          }
-          return res;
-        })
-        .catch(() => caches.match(req)),
-    );
-    return;
-  }
-
   // الخطوط والصور: المحفوظ فوراً مع التحديث في الخلفية
   e.respondWith(
     caches.open(VERSION).then(async (cache) => {
@@ -87,3 +85,38 @@ self.addEventListener('fetch', (e) => {
     }),
   );
 });
+
+/** هل الطلب صادر من لوحة الإدارة؟ (الصفحة نفسها أو سكربت يستورده) */
+async function fromAdmin(e) {
+  try {
+    if (e.request.referrer && new URL(e.request.referrer).pathname.startsWith('/admin')) return true;
+    if (e.clientId) {
+      const c = await self.clients.get(e.clientId);
+      return !!c && new URL(c.url).pathname.startsWith('/admin');
+    }
+  } catch { /* ignore */ }
+  return /\/admin\.(?:js|css)$/.test(new URL(e.request.url).pathname);
+}
+
+// السكربتات والأنماط للدليل العام: الشبكة أولاً حتى لا تختلط وحدات JS قديمة بجديدة بعد كل تحديث
+function networkFirst(req) {
+  return fetch(req)
+    .then((res) => {
+      if (res.ok) {
+        const copy = res.clone();
+        caches.open(VERSION).then((c) => c.put(req, copy));
+      }
+      return res;
+    })
+    .catch(() => caches.match(req));
+}
+
+async function staleWhileRevalidate(req, key = req) {
+  const cache = await caches.open(VERSION);
+  const hit = await cache.match(key);
+  const net = fetch(req).then((res) => {
+    if (res.ok && !res.redirected) cache.put(key, res.clone());
+    return res;
+  }).catch(() => hit);
+  return hit || net;
+}

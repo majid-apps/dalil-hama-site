@@ -104,7 +104,7 @@ const rep = { Prefer: 'return=representation' };
 // ─────────────── الحالة ───────────────
 
 const A = {
-  me: null, listings: [], byId: new Map(), cats: [], catById: new Map(), areas: [], settings: {}, stats: null, reports: [], excluded: [], exSet: new Set(), admins: [], inboxTab: 'req', candTab: 'todo', candQ: '', candSel: new Set(), idxDirty: false, pendLimit: {},
+  me: null, listings: [], byId: new Map(), cats: [], catById: new Map(), areas: [], settings: {}, stats: null, reports: [], excluded: [], exSet: new Set(), rev: 0, sorted: null, admins: [], inboxTab: 'req', candTab: 'todo', candQ: '', candSel: new Set(), idxDirty: false, pendLimit: {},
   index: new SearchIndex(), f: { q: '', cat: '', status: 'approved', flag: '', area: '', sort: 'new' }, selected: new Set(), page: 0, reportTab: 'open',
 };
 
@@ -141,8 +141,14 @@ function compact(r) {
   return { i: r.id, n: r.name, c: r.category_id, p: r.phones, a: r.area, d: r.address, e: [r.description, r.admin_note, r.submitter_name].filter(Boolean).join(' '), t: r.tags, k: 0, _row: r };
 }
 
+/** يحدّث الخريطة فقط؛ فهرس البحث (الثقيل على الجوال) يُبنى عند أول بحث فعلي في ensureIndex */
 function indexListings() {
+  A.rev++;
   A.byId = new Map(A.listings.map((r) => [r.id, r]));
+  A.idxDirty = true;
+}
+
+function buildIndex() {
   A.idxDirty = false;
   A.index.setData(A.listings.map(compact), A.cats.map((c) => ({ i: c.id, n: c.name, k: c.keywords, o: c.sort })), A.areas.map((a) => ({ n: a.name })));
 }
@@ -169,6 +175,11 @@ const cache = {
   read: () => cache.run('readonly', (st) => st.get('data')),
   save: () => A.me && cache.run('readwrite', (st) => st.put({ listings: A.listings, cats: A.cats, areas: A.areas, settings: A.settings, stats: A.stats, reports: A.reports, excluded: A.excluded, me: A.me }, 'data')),
   clear: () => cache.run('readwrite', (st) => st.delete('data')),
+  /** حفظ مؤجَّل: ينتظر هدوء التطبيق حتى لا يعطّل النسخ الكبير الواجهة (والإخفاء/الإغلاق يحفظ فوراً) */
+  later() {
+    clearTimeout(cache.t);
+    cache.t = setTimeout(() => (window.requestIdleCallback ? requestIdleCallback(() => cache.save(), { timeout: 8000 }) : cache.save()), 2500);
+  },
 };
 function dropSession() { auth.clear(); cache.clear(); }
 
@@ -224,7 +235,7 @@ async function refreshStats() {
 }
 
 // فهرس البحث يُعاد بناؤه عند أول بحث فقط، لا مع كل موافقة (كان يبطّئ الموافقة والضم)
-function ensureIndex() { if (A.idxDirty) indexListings(); }
+function ensureIndex() { if (A.idxDirty) buildIndex(); }
 function upsertMany(rows) {
   for (const row of rows) {
     const old = A.byId.get(row.id);
@@ -232,6 +243,8 @@ function upsertMany(rows) {
     A.byId.set(row.id, row);
   }
   A.idxDirty = true;
+  A.rev++;
+  cache.later();
 }
 function upsertLocal(row) { upsertMany([row]); }
 function removeMany(ids) {
@@ -239,6 +252,8 @@ function removeMany(ids) {
   A.listings = A.listings.filter((r) => !gone.has(r.id));
   gone.forEach((id) => A.byId.delete(id));
   A.idxDirty = true;
+  A.rev++;
+  cache.later();
 }
 function removeLocal(id) { removeMany([id]); }
 
@@ -405,7 +420,7 @@ async function start() {
     A.me = await rpc('admin_me');
     if (!A.me) { dropSession(); return renderLogin('هذا الحساب لا يملك صلاحية الإدارة.'); }
     await loadAll(cached && cached.listings);
-    cache.save();
+    cache.later();
   })();
   if (cached && cached.me) {
     A.me = cached.me;
@@ -972,7 +987,7 @@ async function excludePhones(phones, note = null) {
   upsertMany(rows);
   setExcluded(ex);
   refreshStats();
-  cache.save();
+  cache.later();
   return list.length;
 }
 
@@ -1029,7 +1044,7 @@ function viewExcluded(el) {
     try {
       await rest(`excluded_phones?phone=eq.${encodeURIComponent(ph)}`, { method: 'DELETE' });
       setExcluded(A.excluded.filter((x) => x.phone !== ph));
-      cache.save();
+      cache.later();
       toast('أُعيد السماح بالرقم');
       viewExcluded(el);
     } catch (err) { toast(errMsg(err), true); }
@@ -1108,12 +1123,22 @@ function viewReports(el) {
 
 // ─────────────── الأنشطة ───────────────
 
+/** الترتيب الكامل يُحسب مرة لكل (تغيّر في البيانات + نوع الترتيب) لا مع كل ضغطة مفتاح */
+function sortedAll(sort) {
+  const key = `${A.rev}:${A.listings.length}:${sort}`;
+  if (A.sorted && A.sorted.key === key) return A.sorted.rows;
+  let rows = A.listings;
+  if (sort === 'new') rows = [...rows].sort((a, b) => b.id - a.id);
+  else if (sort === 'name') rows = [...rows].sort((a, b) => a.name.localeCompare(b.name, 'ar'));
+  else if (sort === 'updated') rows = [...rows].sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  A.sorted = { key, rows };
+  return rows;
+}
+
 function filtered() {
   const f = A.f;
-  let rows;
-  if (f.q.trim()) rows = (ensureIndex(), A.index).search(f.q).results.map((c) => c._row);
-  else rows = A.listings;
-  rows = rows.filter((r) => {
+  const rows = f.q.trim() ? (ensureIndex(), A.index).search(f.q).results.map((c) => c._row) : sortedAll(f.sort);
+  return rows.filter((r) => {
     if (f.status !== 'all' && r.status !== f.status) return false;
     if (f.cat && r.category_id !== Number(f.cat)) return false;
     if (f.area && (f.area === '__none' ? r.area : r.area !== f.area)) return false;
@@ -1125,12 +1150,6 @@ function filtered() {
     if (f.flag === 'odd' && !(r.phones || []).some((p) => !/^0\d{9}$/.test(p))) return false;
     return true;
   });
-  if (!f.q.trim()) {
-    if (f.sort === 'new') rows = [...rows].sort((a, b) => b.id - a.id);
-    else if (f.sort === 'name') rows = [...rows].sort((a, b) => a.name.localeCompare(b.name, 'ar'));
-    else if (f.sort === 'updated') rows = [...rows].sort((a, b) => b.updated_at.localeCompare(a.updated_at));
-  }
-  return rows;
 }
 
 function viewListings(el) {
@@ -1205,7 +1224,7 @@ function viewListings(el) {
     A.selected.clear(); // لا نُبقي محددات مخفية عن الشاشة فتُحذف أو تُعدَّل دون قصد
     draw();
   };
-  $('#f-q').addEventListener('input', debounce(onF, 150));
+  $('#f-q').addEventListener('input', debounce(onF, 300));
   ['#f-status', '#f-cat', '#f-area', '#f-flag', '#f-sort'].forEach((s) => $(s).addEventListener('change', onF));
   el.onchange = (e) => {
     const cb = e.target.closest('[data-sel]');
