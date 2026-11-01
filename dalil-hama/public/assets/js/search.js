@@ -44,7 +44,27 @@ export class SearchIndex {
     this.areaNames = [];
   }
 
-  setData(items, cats, areas) {
+  /** بناء الفهرس على دفعات صغيرة تتخلّلها فترات راحة حتى لا تتجمّد الواجهة (للوحة الإدارة). `alive()` يُوقف البناء إن بطل لزومه */
+  async setDataChunked(items, cats, areas, { size = 150, alive = () => true } = {}) {
+    this.setMeta(cats, areas);
+    for (let i = 0; i < items.length; i += size) {
+      if (!alive()) return false;
+      for (const it of items.slice(i, i + size)) this.prepare(it);
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    if (!alive()) return false;
+    this.items = items;
+    return true;
+  }
+
+  /** تحديث عنصر واحد أو أكثر في فهرس مبني دون إعادة بنائه كله */
+  patch(upserts, removeIds) {
+    const gone = new Set([...removeIds, ...upserts.map((u) => u.i)]);
+    this.items = this.items.filter((x) => !gone.has(x.i));
+    for (const it of upserts) { this.prepare(it); this.items.push(it); }
+  }
+
+  setMeta(cats, areas) {
     this.cats = new Map(cats.map((c) => [c.i, c]));
     this.catTokens = cats.map((c) => ({
       id: c.i,
@@ -55,6 +75,10 @@ export class SearchIndex {
       ].map(stem))],
     }));
     this.areaNames = areas.map((a) => ({ name: a.n, norm: normalize(a.n), stems: tokens(a.n).map(stem) }));
+  }
+
+  setData(items, cats, areas) {
+    this.setMeta(cats, areas);
     for (const it of items) this.prepare(it);
     this.items = items;
   }

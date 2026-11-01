@@ -104,7 +104,7 @@ const rep = { Prefer: 'return=representation' };
 // ─────────────── الحالة ───────────────
 
 const A = {
-  me: null, listings: [], byId: new Map(), cats: [], catById: new Map(), areas: [], settings: {}, stats: null, reports: [], excluded: [], exSet: new Set(), rev: 0, sorted: null, admins: [], inboxTab: 'req', candTab: 'todo', candQ: '', candSel: new Set(), idxDirty: false, pendLimit: {},
+  me: null, listings: [], byId: new Map(), cats: [], catById: new Map(), areas: [], settings: {}, stats: null, reports: [], excluded: [], exSet: new Set(), rev: 0, sorted: null, admins: [], inboxTab: 'req', candTab: 'todo', candQ: '', candSel: new Set(), idxFull: true, idxBuilt: false, idxTok: 0, idxPatch: new Set(), idxTimer: 0, pendLimit: {},
   index: new SearchIndex(), f: { q: '', cat: '', status: 'approved', flag: '', area: '', sort: 'new' }, selected: new Set(), page: 0, reportTab: 'open',
 };
 
@@ -141,16 +141,36 @@ function compact(r) {
   return { i: r.id, n: r.name, c: r.category_id, p: r.phones, a: r.area, d: r.address, e: [r.description, r.admin_note, r.submitter_name].filter(Boolean).join(' '), t: r.tags, k: 0, _row: r };
 }
 
-/** يحدّث الخريطة فقط؛ فهرس البحث (الثقيل على الجوال) يُبنى عند أول بحث فعلي في ensureIndex */
+/** يحدّث الخريطة ويُبطل فهرس البحث (الثقيل على الجوال)؛ يُعاد بناؤه في الخلفية على دفعات، أو فوراً عند أول بحث إن لم يكتمل */
 function indexListings() {
   A.rev++;
   A.byId = new Map(A.listings.map((r) => [r.id, r]));
-  A.idxDirty = true;
+  A.idxFull = true;
+  A.idxTok++;
+  scheduleIndex();
 }
 
+const idxMeta = () => [A.cats.map((c) => ({ i: c.id, n: c.name, k: c.keywords, o: c.sort })), A.areas.map((a) => ({ n: a.name }))];
+
 function buildIndex() {
-  A.idxDirty = false;
-  A.index.setData(A.listings.map(compact), A.cats.map((c) => ({ i: c.id, n: c.name, k: c.keywords, o: c.sort })), A.areas.map((a) => ({ n: a.name })));
+  A.index.setData(A.listings.map(compact), ...idxMeta());
+  A.idxFull = false;
+  A.idxBuilt = true;
+  A.idxPatch.clear();
+}
+
+/** بناء الفهرس في الخلفية بعد هدوء التطبيق، على دفعات صغيرة لا تُجمّد الشاشة؛ يُهمَل إن تغيّرت البيانات أثناءه */
+function scheduleIndex() {
+  clearTimeout(A.idxTimer);
+  A.idxTimer = setTimeout(() => {
+    const run = async () => {
+      if (A.idxBuilt && !A.idxFull) return;
+      const tok = A.idxTok;
+      const ok = await A.index.setDataChunked(A.listings.map(compact), ...idxMeta(), { alive: () => tok === A.idxTok && A.idxFull });
+      if (ok && tok === A.idxTok) { A.idxFull = false; A.idxBuilt = true; A.idxPatch.clear(); }
+    };
+    if (window.requestIdleCallback) requestIdleCallback(run, { timeout: 15000 }); else run();
+  }, 2500);
 }
 
 // نسخة مؤقتة على الجهاز (IndexedDB): تُعرض فور الفتح ثم تُحدَّث من الخادم في الخلفية. تُمحى عند الخروج.
@@ -235,14 +255,22 @@ async function refreshStats() {
 }
 
 // فهرس البحث يُعاد بناؤه عند أول بحث فقط، لا مع كل موافقة (كان يبطّئ الموافقة والضم)
-function ensureIndex() { if (A.idxDirty) buildIndex(); }
+function ensureIndex() {
+  if (A.idxFull || !A.idxBuilt || A.idxPatch.size > 200) { buildIndex(); return; }
+  if (!A.idxPatch.size) return;
+  // تعديلات قليلة: نحدّث عناصرها وحدها بدل إعادة بناء الفهرس كله
+  const ups = []; const gone = [];
+  for (const id of A.idxPatch) { const r = A.byId.get(id); if (r) ups.push(compact(r)); else gone.push(id); }
+  A.index.patch(ups, gone);
+  A.idxPatch.clear();
+}
 function upsertMany(rows) {
   for (const row of rows) {
     const old = A.byId.get(row.id);
     if (old) A.listings[A.listings.indexOf(old)] = row; else A.listings.push(row);
     A.byId.set(row.id, row);
+    A.idxPatch.add(row.id);
   }
-  A.idxDirty = true;
   A.rev++;
   cache.later();
 }
@@ -250,8 +278,7 @@ function upsertLocal(row) { upsertMany([row]); }
 function removeMany(ids) {
   const gone = new Set(ids);
   A.listings = A.listings.filter((r) => !gone.has(r.id));
-  gone.forEach((id) => A.byId.delete(id));
-  A.idxDirty = true;
+  gone.forEach((id) => { A.byId.delete(id); A.idxPatch.add(id); });
   A.rev++;
   cache.later();
 }
