@@ -960,13 +960,13 @@ function viewPending(el, mode = 'req') {
 
 // ─────────────── الأرقام المستبعدة نهائياً ───────────────
 
-/** يحفظ الأرقام في قائمة الاستبعاد (لا تُنشر ولا تُستورد ثانية إلا بأمرك) ويرفض بطاقاتها، ثم يحدّث الشاشة محلياً */
+/** يحفظ الأرقام في قائمة الاستبعاد (لا تُنشر ولا تُستورد ثانية إلا بأمرك) ويحذف كلاً منها من بطاقاتها؛ تُرفض البطاقة فقط إن لم يبقَ فيها رقم ولا موقع ولا عنوان */
 async function excludePhones(phones, note = null) {
   const list = [...new Set(phones.map(normalizePhone).filter(Boolean))];
   if (!list.length) throw new Error('لا يوجد رقم صالح');
-  await rpc('admin_exclude', { p_phones: list, p_note: note });
+  const ids = await rpc('admin_exclude', { p_phones: list, p_note: note });
   const [rows, ex] = await Promise.all([
-    rest(`listings?select=*&phones=ov.{${list.map((p) => `"${p}"`).join(',')}}`),
+    ids && ids.length ? rest(`listings?select=*&id=in.(${ids.join(',')})`) : [],
     rest('excluded_phones?select=*&order=created_at.desc'),
   ]);
   upsertMany(rows);
@@ -976,12 +976,24 @@ async function excludePhones(phones, note = null) {
   return list.length;
 }
 
+/** اختيار رقم واحد من بطاقة فيها عدة أرقام */
+function pickPhone(r) {
+  if (r.phones.length === 1) return Promise.resolve(r.phones[0]);
+  return new Promise((ok) => {
+    const sh = openSheet('أي رقم تستبعد؟', `<div class="form">${r.phones.map((p) => `<button class="btn btn-soft btn-block" type="button" data-pick="${esc(p)}"><bdi dir="ltr">${esc(formatPhone(p))}</bdi></button>`).join('')}</div>`, { wide: false });
+    sh.addEventListener('click', (e) => { const b = e.target.closest('[data-pick]'); if (b) { closeSheet(); ok(b.dataset.pick); } });
+    sh.querySelector('[data-close]').addEventListener('click', () => ok(null));
+  });
+}
+
 async function excludeListing(r, after) {
   if (!(r.phones || []).length) { toast('لا رقم في هذه البطاقة لاستبعاده', true); return; }
-  const ph = r.phones.map((p) => `<b dir="ltr">${esc(formatPhone(p))}</b>`).join(' / ');
-  if (!(await confirmBox(`استبعاد ${ph} نهائياً؟ تُرفض بطاقة «${esc(r.name)}» ولا يظهر الرقم ولا يُقبل من الزوار أو الاستيراد إلا بعد إزالته من «الأرقام المستبعدة».`, { ok: 'استبعاد نهائي', danger: true }))) return;
+  const ph = await pickPhone(r);
+  if (!ph) return;
+  const keeps = r.phones.length > 1 || r.lat || safeUrl(r.map_url) || (r.address || '').trim();
+  if (!(await confirmBox(`استبعاد <b dir="ltr">${esc(formatPhone(ph))}</b> نهائياً؟ يُحذف هذا الرقم فقط من بطاقة «${esc(r.name)}» ومن أي بطاقة أخرى تحمله، ولا يظهر ولا يُقبل من الزوار أو الاستيراد إلا بعد إزالته من «الأرقام المستبعدة».${keeps ? ' تبقى البطاقة منشورة بما فيها من أرقام وموقع وعنوان.' : ' لن يبقى في البطاقة رقم ولا موقع ولا عنوان فتُرفض.'}`, { ok: 'استبعاد نهائي', danger: true }))) return;
   try {
-    await excludePhones(r.phones, r.name);
+    await excludePhones([ph], r.name);
     toast('استُبعد الرقم وحُفظ في القائمة ✓');
     if (after) after();
   } catch (err) { toast(errMsg(err), true); }
@@ -989,7 +1001,7 @@ async function excludeListing(r, after) {
 
 function viewExcluded(el) {
   const rows = A.excluded;
-  el.innerHTML = `<div class="warnbox" style="margin-bottom:12px">${I('info', 'sm')}الأرقام هنا لا تُنشر ولا تُقبل من الزوار أو الاستيراد أبداً، إلا إذا أزلتها من القائمة بنفسك.</div>
+  el.innerHTML = `<div class="warnbox" style="margin-bottom:12px">${I('info', 'sm')}الأرقام هنا لا تُنشر ولا تُقبل من الزوار أو الاستيراد أبداً، إلا إذا أزلتها من القائمة بنفسك. الاستبعاد يحذف الرقم وحده من بطاقاته، وتبقى البطاقة منشورة ما دام فيها رقم آخر أو موقع أو عنوان.</div>
     <form class="panel form" id="ex-form" style="margin-top:0"><h2>${I('x')}استبعاد رقم</h2>
       <label class="field"><span>الرقم <em>(أي صيغة، مثل +963 960 912 185)</em></span><textarea class="input" name="phones" dir="ltr" rows="2" placeholder="يمكن كتابة أكثر من رقم، كل رقم في سطر" required></textarea></label>
       <label class="field"><span>ملاحظة <em>(اختياري)</em></span><input class="input" name="note" maxlength="300"></label>
@@ -1015,7 +1027,7 @@ function viewExcluded(el) {
     const b = e.target.closest('[data-unex]');
     if (!b) return;
     const ph = b.dataset.unex;
-    if (!(await confirmBox(`إعادة السماح بالرقم <b dir="ltr">${esc(formatPhone(ph))}</b>؟ سيمكن نشره واستيراده من جديد (البطاقة المرفوضة تبقى مرفوضة حتى تنشرها بنفسك).`, { ok: 'إعادة السماح' }))) return;
+    if (!(await confirmBox(`إعادة السماح بالرقم <b dir="ltr">${esc(formatPhone(ph))}</b>؟ سيمكن نشره واستيراده من جديد (لا يعود تلقائياً إلى بطاقته القديمة).`, { ok: 'إعادة السماح' }))) return;
     try {
       await rest(`excluded_phones?phone=eq.${encodeURIComponent(ph)}`, { method: 'DELETE' });
       setExcluded(A.excluded.filter((x) => x.phone !== ph));
@@ -1241,7 +1253,7 @@ function editListing(id, preset = {}) {
     ${id ? `<details><summary class="muted" style="cursor:pointer">سجل التعديلات على هذا النشاط</summary><ul class="audit mt" id="audit"><li class="muted">جارٍ التحميل…</li></ul></details>` : ''}
     <div class="form-foot">
       <button class="btn btn-primary" type="submit">${I('check', 'sm')}حفظ</button>
-      ${id ? `<a class="btn btn-soft" href="/?l=${id}" target="_blank">${I('eye', 'sm')}عرض</a><button class="btn btn-soft" type="button" id="merge-btn">${I('merge', 'sm')}دمج</button>${(r.phones || []).length ? `<button class="btn btn-soft" type="button" id="excl-btn">${I('x', 'sm')}استبعاد نهائي</button>` : ''}<button class="btn btn-danger" type="button" id="del-btn" aria-label="حذف">${I('trash', 'sm')}</button>` : ''}
+      ${id ? `<a class="btn btn-soft" href="/?l=${id}" target="_blank">${I('eye', 'sm')}عرض</a><button class="btn btn-soft" type="button" id="merge-btn">${I('merge', 'sm')}دمج</button>${(r.phones || []).length ? `<button class="btn btn-soft" type="button" id="excl-btn">${I('x', 'sm')}استبعاد رقم نهائياً</button>` : ''}<button class="btn btn-danger" type="button" id="del-btn" aria-label="حذف">${I('trash', 'sm')}</button>` : ''}
     </div>
   </form>`;
   const sh = openSheet(id ? `تعديل: ${esc(r.name)}` : 'نشاط جديد', body);
