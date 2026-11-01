@@ -638,7 +638,7 @@ function viewDash(el) {
     </div>
     <div class="more-links">
       <a href="#quality">${I('check')}جودة البيانات</a><a href="#cats">${I('grid')}التصنيفات</a><a href="#areas">${I('pin')}الأحياء</a>
-      <a href="#io">${I('download')}استيراد وتصدير</a><a href="#log">${I('history')}سجل التعديلات</a><a href="#settings">${I('settings')}الإعدادات</a>
+      <a href="#io">${I('download')}استيراد وتصدير</a><a href="#excl">${I('x')}الأرقام المستبعدة</a><a href="#log">${I('history')}سجل التعديلات</a><a href="#settings">${I('settings')}الإعدادات</a>
     </div>
     <div class="kpis">
       <a class="kpi good" href="#listings"><small>منشور</small><b>${fmtNum(s.approved)}</b></a>
@@ -1020,9 +1020,16 @@ function viewExcluded(el) {
       <label class="field"><span>ملاحظة <em>(اختياري)</em></span><input class="input" name="note" maxlength="300"></label>
       <button class="btn btn-danger" type="submit">${I('x', 'sm')}استبعاد نهائي</button></form>
     <div class="panel"><h2>${I('list')}القائمة (${fmtNum(rows.length)})</h2>
+      ${rows.length ? `<button class="btn btn-soft" type="button" id="ex-dl" style="margin-bottom:10px">${I('download', 'sm')}تحميل الأرقام المستبعدة (CSV)</button>` : ''}
       ${rows.length ? rows.map((x) => `<div class="row"><span class="avatar" style="width:40px;height:40px;font-size:20px;border-radius:12px">⛔</span>
         <div style="min-width:0"><div class="nm"><bdi dir="ltr">${esc(formatPhone(x.phone))}</bdi></div><div class="sub"><span>${esc(x.name || 'بلا بطاقة')}</span>${x.note ? `<span>${esc(x.note)}</span>` : ''}<span>${timeAgo(x.created_at)}</span></div></div>
         <div class="ops"><button class="btn btn-soft" type="button" data-unex="${esc(x.phone)}">إعادة السماح</button></div></div>`).join('') : '<div class="empty"><p>لا أرقام مستبعدة.</p></div>'}</div>`;
+  const dl = $('#ex-dl', el);
+  if (dl) dl.onclick = () => {
+    const q = (v) => { const t = String(v ?? ''); return /[",\n\r]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+    const csv = '\ufeff' + ['الرقم,اسم البطاقة,ملاحظة,تاريخ الاستبعاد', ...A.excluded.map((x) => [x.phone, x.name, x.note, (x.created_at || '').slice(0, 10)].map(q).join(','))].join('\r\n');
+    download(`excluded-numbers-${new Date().toISOString().slice(0, 10)}.csv`, csv, 'text/csv;charset=utf-8');
+  };
   $('#ex-form', el).addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
