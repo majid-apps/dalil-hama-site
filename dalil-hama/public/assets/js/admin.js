@@ -385,6 +385,9 @@ function viewDiag(el) {
     <a class="btn btn-soft mt" href="#cands">رجوع</a></div>`;
 }
 
+// بعد حفظ أو حذف يستغرق وقتاً: لا تُعاد الشاشة إن انتقل المستخدم إلى غيرها (كانت تكتب فوق الشاشة الجديدة)
+const onView = (v) => (location.hash.slice(1).split('?')[0].split('/')[0] || 'dash') === v;
+
 function route() {
   const dl = deepLink();
   let v = location.hash.slice(1).split('?')[0].split('/')[0] || 'dash';
@@ -667,7 +670,14 @@ function viewDash(el) {
 
 /** المرشح: رقم أضافته الإدارة أو استوردته للمراجعة (لم يطلب صاحبه الإضافة). الطلب: ما أرسله الزوار بأنفسهم. */
 const isCand = (r) => r.status === 'pending' && r.source !== 'public';
-const CONSENT_MSG = (name) => `السلام عليكم ورحمة الله،\nنحن فريق «دليل حماة — حماة بين يديك»، دليل إلكتروني مجاني لأهل المدينة.\nيسعدنا إدراج «${name}» (الاسم والتصنيف والرقم فقط) في الدليل، ولن نضيفه إلا بموافقتكم.\n✅ للموافقة أرسلوا كلمة «موافق».\n❌ وإن لم ترغبوا فلا حاجة للرد، ولن يُنشر شيء.\nويمكنكم طلب التعديل أو الحذف في أي وقت.\nالموقع: https://dalil-hama.majid.cfd\nشاكرين لكم 🌿`;
+const CONSENT_MSG = (name, link) => `السلام عليكم ورحمة الله،\nنحن فريق «دليل حماة — حماة بين يديك»، دليل إلكتروني مجاني لأهل المدينة.\nيسعدنا إدراج «${name}» (الاسم والتصنيف والرقم فقط) في الدليل، ولن نضيفه إلا بموافقتكم.\n${link ? `👈 للموافقة أو الرفض بضغطة واحدة:\n${link}\nوإن لم يكن هذا الرقم لكم فاختاروا «الرقم خطأ» فيُحذف فوراً.\nويمكنكم أيضاً الرد بكلمة «موافق».` : '✅ للموافقة أرسلوا كلمة «موافق».'}\n❌ وإن لم ترغبوا فلا حاجة للرد، ولن يُنشر شيء.\nويمكنكم طلب التعديل أو الحذف في أي وقت.${link ? '' : '\nالموقع: https://dalil-hama.majid.cfd'}\nشاكرين لكم 🌿`;
+/** رابط شخصي لصاحب الرقم (migration 0012): رمز عشوائي 128 بت يوضع في الرسالة، ولا يُسجَّل في القاعدة إلا لحظة فتح واتساب */
+const ownerToken = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16)))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const ownerLink = (t) => `${location.origin}/r/#${t}`;
+function registerOwnerLink(id, phone, token) {
+  api('/rest/v1/rpc/admin_owner_link', { method: 'POST', body: { p_listing: id, p_phone: phone, p_token: token }, keepalive: true })
+    .catch((err) => toast(`لم يُسجَّل رابط الموافقة، فلن يعمل: ${errMsg(err)}`, true));
+}
 
 const SENT = '📨';
 const isSent = (r) => (r.admin_note || '').includes(SENT);
@@ -739,12 +749,13 @@ function messageQueue(rows, redraw) {
     if (i >= queue.length) { box.innerHTML = `<div class="empty"><div class="big">✅</div><h3>انتهت المراسلة</h3><p>أُرسلت ${fmtNum(queue.length)} رسالة، وانتقلوا إلى «بانتظار الرد».</p></div><button class="btn btn-primary btn-block" id="mq-done">تم</button>`; box.querySelector('#mq-done').onclick = () => { closeSheet(); redraw(); }; return; }
     const r = queue[i];
     const mob = r.phones.find(isMobile);
+    const tok = ownerToken();
     box.innerHTML = `<p class="muted" style="margin-top:0">${fmtNum(i + 1)} من ${fmtNum(queue.length)}</p>
       <div class="req"><h3 style="margin:0 0 4px">${esc(r.name)}</h3><div class="muted"><bdi dir="ltr">${esc(mob)}</bdi> · ${esc(catName(r.category_id))}</div></div>
-      <div class="ops mt"><a class="btn btn-wa btn-lg grow" id="mq-open" href="${waHref(mob, CONSENT_MSG(r.name))}" target="_blank" rel="noopener">${I('wa', 'sm')}فتح واتساب وإرسال</a>
+      <div class="ops mt"><a class="btn btn-wa btn-lg grow" id="mq-open" href="${waHref(mob, CONSENT_MSG(r.name, ownerLink(tok)))}" target="_blank" rel="noopener">${I('wa', 'sm')}فتح واتساب وإرسال</a>
       <button class="btn btn-soft" id="mq-skip">تخطّي</button></div>
       <p class="muted" style="font-size:13px">بعد إرسال الرسالة في واتساب ارجع هنا (زر الرجوع) ثم اضغط الزر مرة أخرى للتالي. تُسجَّل «أُرسلت» تلقائياً عند فتح واتساب.</p>`;
-    box.querySelector('#mq-open').onclick = () => { mark(r); i++; setTimeout(show, 400); };
+    box.querySelector('#mq-open').onclick = () => { registerOwnerLink(r.id, mob, tok); mark(r); i++; setTimeout(show, 400); };
     box.querySelector('#mq-skip').onclick = () => { i++; show(); };
   };
   show();
@@ -890,6 +901,7 @@ function viewPending(el, mode = 'req') {
     $('#pend-list', el).innerHTML = (rows.slice(0, lim).map((r) => {
       const dupIds = [...new Set((r.phones || []).flatMap((p) => byPhone.get(p) || []))].filter((x) => x.id !== r.id);
       const mob = (r.phones || []).find(isMobile);
+      const tok = cand && mob ? ownerToken() : '';
       // بطاقات منشورة تذكرها الملاحظة (#رقم): الأرجح أن الرقم إضافي لها فيُضمّ إليها بضغطة
       const targets = cand ? [...new Set([...(r.admin_note || '').matchAll(/#(\d+)/g)].map((m) => Number(m[1])))]
         .map((id) => A.byId.get(id)).filter((x) => x && x.status === 'approved' && x.id !== r.id).slice(0, 2) : [];
@@ -908,7 +920,7 @@ function viewPending(el, mode = 'req') {
       ${dupIds.length ? `<div class="warnbox">${I('alert', 'sm')}الرقم موجود مسبقاً في: ${dupIds.map((d) => `<a href="#" data-edit="${d.id}" style="font-weight:700">${esc(d.name)}</a>`).join('، ')}</div>` : ''}
       <div class="ops">
         <button class="btn btn-primary" data-approve="${r.id}">${I('check', 'sm')}${cand ? 'وافق — انشر' : 'قبول ونشر'}</button>
-        ${mob ? `<a class="btn btn-wa" href="${waHref(mob, cand ? CONSENT_MSG(r.name) : `مرحباً، وصلنا طلب إضافة «${r.name}» إلى دليل حماة. نود التأكد من صحة البيانات قبل النشر 🌿`)}" target="_blank" rel="noopener"${cand && !isSent(r) ? ` data-wa-sent="${r.id}"` : ''}>${I('wa', 'sm')}${cand ? 'رسالة الموافقة' : 'تحقق عبر واتساب'}</a>` : ''}
+        ${mob ? `<a class="btn btn-wa" href="${waHref(mob, cand ? CONSENT_MSG(r.name, ownerLink(tok)) : `مرحباً، وصلنا طلب إضافة «${r.name}» إلى دليل حماة. نود التأكد من صحة البيانات قبل النشر 🌿`)}" target="_blank" rel="noopener"${cand && !isSent(r) ? ` data-wa-sent="${r.id}"` : ''}${cand ? ` data-owner="${r.id}" data-ph="${esc(mob)}" data-tok="${tok}"` : ''}>${I('wa', 'sm')}${cand ? 'رسالة الموافقة' : 'تحقق عبر واتساب'}</a>` : ''}
         ${r.phones && r.phones[0] ? `<a class="btn btn-soft" href="${telHref(r.phones[0])}">${I('phone', 'sm')}اتصال</a>` : ''}
         ${cand && isSent(r) ? `<button class="btn btn-soft" data-sent="${r.id}">إلغاء «أُرسلت»</button>` : ''}
         ${cand && !isSent(r) && !mob ? `<button class="btn btn-soft" data-sent="${r.id}">${SENT} تواصلتُ معه</button>` : ''}
@@ -939,6 +951,8 @@ function viewPending(el, mode = 'req') {
     if (e.target.closest('[data-more]')) { A.pendLimit[mode] = (A.pendLimit[mode] || PEND_PAGE) + PEND_PAGE; draw(); return; }
     const at = e.target.closest('[data-attach]');
     if (at) { attachCand(Number(at.dataset.attach), at.dataset.to ? Number(at.dataset.to) : null, again); return; }
+    const ow = e.target.closest('[data-tok]');
+    if (ow) registerOwnerLink(Number(ow.dataset.owner), ow.dataset.ph, ow.dataset.tok);
     const wa = e.target.closest('[data-wa-sent]');
     if (wa) {
       // يفتح واتساب برسالة الموافقة، ويُسجَّل «أُرسلت» في الخلفية (التراجع من تبويب «بانتظار الرد»)
@@ -1003,6 +1017,8 @@ function excludePhones(phones, note = null) {
       upsertMany(rows);
       setExcluded(ex);
       refreshStats();
+      // إن فُتحت «الأرقام المستبعدة» قبل وصول ردّ الخادم: تُعاد لتظهر «إعادة الرقم لبطاقته» (سجلّها يأتي من الخادم)
+      if (/^#excl/.test(location.hash) && !document.querySelector('.sheet, dialog[open]') && !document.activeElement?.closest('#ex-form')) route();
     } catch (e) {
       upsertMany(orig);
       setExcluded(prevEx);
@@ -1537,7 +1553,7 @@ function viewCats(el) {
       A.cats.push(c);
       A.catById.set(c.id, c);
       toast('تمت الإضافة ✓');
-      viewCats(el);
+      if (onView('cats')) viewCats(el);
     } catch (err) { toast(errMsg(err), true); }
   };
   el.onclick = async (e) => {
@@ -1577,7 +1593,7 @@ function viewCats(el) {
           indexListings();
           closeSheet();
           toast('تم الحذف');
-          viewCats(el);
+          if (onView('cats')) viewCats(el);
         } catch (err) { toast(errMsg(err), true); }
       };
     }
@@ -1600,7 +1616,7 @@ function viewAreas(el) {
       const [a] = await rest('areas', { method: 'POST', body: { name: new FormData(e.target).get('name').trim(), sort: (A.areas.at(-1)?.sort || 0) + 10 }, headers: rep });
       A.areas.push(a);
       toast('تمت الإضافة ✓');
-      viewAreas(el);
+      if (onView('areas')) viewAreas(el);
     } catch (err) { toast(errMsg(err), true); }
   };
   el.onclick = async (e) => {
@@ -1629,7 +1645,7 @@ function viewAreas(el) {
         A.areas = A.areas.filter((x) => x.id !== a.id);
         indexListings();
         toast('تم الحذف');
-        viewAreas(el);
+        if (onView('areas')) viewAreas(el);
       }
     } catch (err) { toast(errMsg(err), true); }
   };
@@ -1889,4 +1905,19 @@ document.addEventListener('click', async (e) => {
 
 start();
 
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') cache.save(); });
+// العودة إلى التطبيق بعد دقيقة أو أكثر: تحديث تفاضلي خفيف، لأن أصحاب الأرقام يردّون من رابط الموافقة والتطبيق في الخلفية.
+// تُحدَّث الأعداد دائماً، ولا تُعاد إلا الشاشة الرئيسية (غيرها قد يكون فيه بحث أو كتابة فلا نمسحها؛ تتحدّث عند فتحها التالي)
+let lastSync = Date.now();
+async function resync() {
+  if (!A.me || resync.busy || Date.now() - lastSync < 60000) return;
+  resync.busy = true;
+  try {
+    await loadAll(A.listings);
+    lastSync = Date.now();
+    cache.later();
+    renderNavCounts();
+    const v = location.hash.slice(1).split('?')[0] || 'dash';
+    if (v === 'dash' && !document.querySelector('.sheet, dialog[open]')) route();
+  } catch { /* انقطاع الاتصال: نبقى على ما عندنا */ } finally { resync.busy = false; }
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') cache.save(); else resync(); });

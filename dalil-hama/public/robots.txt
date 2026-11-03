@@ -1,5 +1,6 @@
 User-agent: *
 Allow: /
 Disallow: /admin/
+Disallow: /r/
 
 Sitemap: https://dalil-hama.majid.cfd/sitemap.xml
