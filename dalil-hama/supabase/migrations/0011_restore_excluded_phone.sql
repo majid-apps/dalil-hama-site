@@ -1,5 +1,8 @@
--- دليل حماة — استرجاع رقم مستبعد إلى بطاقته مباشرة (للرقم الذي استُبعد خطأً)
--- نسجّل مع كل استبعاد البطاقات التي حُذف منها الرقم وحالتها قبل الحذف، ثم تعيدها admin_restore_phone.
+-- دليل حماة — «إعادة الرقم لبطاقته»: استرجاع رقم استُبعد خطأً بضغطة واحدة
+-- مع كل استبعاد يُسجَّل في removed_from لكل بطاقة حُذف منها الرقم: معرّفها، ومكان الرقم بين أرقامها،
+-- وهل كان رقم واتسابها، وهل رفضها الاستبعاد نفسه (لم يبقَ فيها رقم ولا موقع ولا عنوان) وحالتها قبله.
+-- ثم admin_restore_phone تزيل الرقم من القائمة وتعيده إلى تلك البطاقات كما كان.
+-- ما استُبعد قبل هذا الملف ليس له سجل، فيبقى له «إعادة السماح» وحده.
 
 alter table public.excluded_phones add column if not exists removed_from jsonb not null default '[]'::jsonb;
 
@@ -11,6 +14,7 @@ declare
   ids bigint[] := '{}';
   l record;
   left_phones text[];
+  rej boolean;
   rec jsonb;
   stamp text := E'\n⛔ استُبعد رقم نهائياً ' || current_date;
 begin
@@ -24,13 +28,18 @@ begin
     rec := '[]'::jsonb;
     for l in select * from public.listings where n = any(phones) loop
       left_phones := array(select q from unnest(l.phones) q where public.normalize_phone(q) is distinct from n);
-      rec := rec || jsonb_build_array(jsonb_build_object('id', l.id, 'status', l.status, 'wa', public.normalize_phone(l.whatsapp) = n));
+      rej := l.status <> 'rejected' and cardinality(left_phones) = 0
+             and l.lat is null and coalesce(l.map_url, '') = '' and coalesce(btrim(l.address), '') = '';
+      rec := rec || jsonb_build_array(jsonb_build_object(
+        'id', l.id,
+        'pos', array_position(l.phones, n),
+        'wa', coalesce(public.normalize_phone(l.whatsapp) = n, false),
+        'rej', rej,
+        'status', l.status));
       update public.listings
          set phones = left_phones,
              whatsapp = case when public.normalize_phone(whatsapp) = n then null else whatsapp end,
-             status = case when l.status <> 'rejected' and cardinality(left_phones) = 0
-                            and l.lat is null and coalesce(l.map_url, '') = '' and coalesce(btrim(l.address), '') = ''
-                           then 'rejected' else l.status end,
+             status = case when rej then 'rejected' else l.status end,
              admin_note = btrim(coalesce(admin_note, '') || stamp, E'\n')
        where id = l.id;
       ids := ids || l.id;
@@ -41,27 +50,31 @@ begin
 end $$;
 grant execute on function public.admin_exclude(text[], text) to authenticated;
 
--- استرجاع: يحذف الرقم من القائمة ويعيده إلى البطاقات التي أُخذ منها (وحالتها السابقة إن كانت رُفضت بسببه)
+-- الاسترجاع: يحذف الرقم من القائمة أولاً (كي لا يمنعه حارس الأرقام المستبعدة)، ثم يعيده إلى مكانه في كل بطاقة
+-- ما زالت موجودة، ورقمَ واتساب إن كان كذلك وبقي فارغاً، وحالتها السابقة إن كان الاستبعاد هو الذي رفضها وما زالت مرفوضة.
 create or replace function public.admin_restore_phone(p_phone text)
 returns bigint[] language plpgsql security definer set search_path = public as $$
 declare
   n text := public.normalize_phone(p_phone);
-  ex record;
+  src jsonb;
   e jsonb;
-  l record;
+  l public.listings;
+  pos integer;
   ids bigint[] := '{}';
 begin
   if not public.is_admin() then raise exception 'forbidden' using errcode = '42501'; end if;
-  select * into ex from public.excluded_phones where phone = n;
+  delete from public.excluded_phones where phone = n returning removed_from into src;
   if not found then return ids; end if;
-  delete from public.excluded_phones where phone = n;  -- أولاً، حتى لا يمنع الحارس إعادة النشر
-  for e in select * from jsonb_array_elements(ex.removed_from) loop
-    select * into l from public.listings where id = (e->>'id')::bigint;
+  for e in select value from jsonb_array_elements(coalesce(src, '[]'::jsonb)) loop
+    select * into l from public.listings where id = (e ->> 'id')::bigint;
     if not found then continue; end if;
+    pos := least(greatest(coalesce((e ->> 'pos')::integer, cardinality(l.phones) + 1), 1), cardinality(l.phones) + 1);
     update public.listings
-       set phones = case when n = any(phones) then phones else phones || n end,
-           whatsapp = case when whatsapp is null and (e->>'wa')::boolean then n else whatsapp end,
-           status = case when l.status = 'rejected' and (e->>'status') in ('approved', 'pending') then e->>'status' else l.status end,
+       set phones = case when n = any(phones) then phones else phones[1:pos - 1] || n || phones[pos:] end,
+           whatsapp = case when whatsapp is null and coalesce((e ->> 'wa')::boolean, false) then n else whatsapp end,
+           status = case when status = 'rejected' and coalesce((e ->> 'rej')::boolean, false)
+                              and (e ->> 'status') in ('approved', 'pending', 'hidden')
+                         then (e ->> 'status')::public.listing_status else status end,
            admin_note = btrim(coalesce(admin_note, '') || E'\n↩️ أُعيد رقم مستبعد ' || current_date, E'\n')
      where id = l.id;
     ids := ids || l.id;
