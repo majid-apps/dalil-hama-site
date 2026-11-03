@@ -12,7 +12,7 @@
 | البيانات وأدوات الجمع (مستودع خاص) | https://github.com/majid-apps/dalil-hama |
 
 - `main` في مستودع الكود هو ما يعمل على الموقع الحي.
-- `release/v1.5.1` أحدث إصدار معتمد، وقبله `release/v1.5.0` و`release/v1.4.0` و`release/v1.3.0` و`release/v1.2.1` و`release/v1.2.0` و`release/v1.1.0` و`release/v1.0.0`؛ كلها محفوظة للرجوع إليها.
+- `release/v1.6.0` أحدث إصدار معتمد، وقبله `release/v1.5.1` و`release/v1.5.0` و`release/v1.4.0` و`release/v1.3.0` و`release/v1.2.1` و`release/v1.2.0` و`release/v1.1.0` و`release/v1.0.0`؛ كلها محفوظة للرجوع إليها.
 
 ## 2) بدء جلسة Claude جديدة (للتعديل أو الإضافة)
 1. افتح claude.ai/code، ثم ابدأ جلسة جديدة، واختر المستودع **`majid-apps/dalil-hama-site`**.
