@@ -18,7 +18,7 @@
 - عند تغيير js/css ارفع `?v=` في `index.html` و`admin/index.html` ورقم `VERSION` في `sw.js`. وطابق أرقام `?v=` الخاصة بالإدارة في قائمة `SHELL` داخل `sw.js` (الإدارة تُخزَّن على الجوال وتفتح فوراً ثم تتحدّث في الخلفية). لا سكربتات مضمّنة في HTML. لا تغيّر `assets/js/config.js`.
 
 ## الإصدارات
-- `main` = ما يعمل على الموقع الحي. كل إصدار معتمد يُحفظ كفرع `release/vX.Y.Z` (رفع الوسوم tags مرفوض من جلسات Claude). الحالي: `release/v1.5.1` (قبله `release/v1.5.0` و`release/v1.4.0` و`release/v1.3.0` و`release/v1.2.1` و`release/v1.2.0` و`release/v1.1.0` و`release/v1.0.0`). الرجوع على السيرفر: `sudo dalil-hama-site previous`.
+- `main` = ما يعمل على الموقع الحي. كل إصدار معتمد يُحفظ كفرع `release/vX.Y.Z` (رفع الوسوم tags مرفوض من جلسات Claude). الحالي: `release/v1.6.0` (قبله `release/v1.5.1` و`release/v1.5.0` و`release/v1.4.0` و`release/v1.3.0` و`release/v1.2.1` و`release/v1.2.0` و`release/v1.1.0` و`release/v1.0.0`). الرجوع على السيرفر: `sudo dalil-hama-site previous`.
 - بعد كل إصدار حدّث جدول الإصدارات في `docs/HANDBOOK.md`.
 - قبل أي إصدار: افحص في متصفح (Playwright موجود) بحجم جوال، ولا تختبر الكتابة على الموقع الحي (اعترض `track` و`log_search` و`submit_*`).
 
@@ -37,4 +37,6 @@
 - الدخول بكلمة المرور فقط (دالة `admin_login_hint`، migration 0007). البريد في `public.admins` ولا يظهر في الواجهة. حساب واحد (مجيد).
   كلمة المرور 8 أحرف على الأقل (`GOTRUE_PASSWORD_MIN_LENGTH=8`). «خروج» بـ`scope=local` (هذا الجهاز وحده)، ولا تستعمل جلسات Claude
   `/auth/v1/logout` بلا `scope=local`: الافتراضي يُخرج مجيد من كل أجهزته.
+  **الدخول بالبصمة** (v1.6.0، في المتصفح وحده): مفتاح مرور بامتداد PRF يشفّر كلمة المرور على الجهاز (`dh:admin-bio`) ثم يدخل بها كالمعتاد؛
+  لا شيء له في الخادم ولا القاعدة، فلا تضف له جداول أو دوال. الفحص بجهاز بصمة افتراضي (CDP `WebAuthn.addVirtualAuthenticator` مع `hasPrf`).
 - روابط سريعة: `/admin/#edit/ID` و`/admin/#new?name=…&phone=…`، وزر «لوحة الإدارة» في الدليل يظهر للمدير المسجّل فقط.

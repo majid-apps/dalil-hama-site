@@ -181,7 +181,8 @@ const cache = {
     cache.t = setTimeout(() => (window.requestIdleCallback ? requestIdleCallback(() => cache.save(), { timeout: 8000 }) : cache.save()), 2500);
   },
 };
-function dropSession() { auth.clear(); cache.clear(); }
+// A.me = null: بعد الخروج لا تُرسم شاشات الإدارة عند تغيّر العنوان، ولا يجري التحديث عند العودة إلى التطبيق
+function dropSession() { auth.clear(); cache.clear(); A.me = null; }
 
 function setExcluded(rows) {
   A.excluded = rows;
@@ -274,16 +275,143 @@ document.addEventListener('click', (e) => {
   inp.focus();
 });
 
+// ─────────────── الدخول بالبصمة (بصمة الجهاز نفسه) ───────────────
+// لا شيء للبصمة في الخادم: مفتاح مرور (passkey) على الجهاز بامتداد PRF لا يعطي سرّه إلا بعد البصمة، وبهذا السر تُشفَّر
+// كلمة المرور على هذا الجهاز وحده (AES-GCM في dh:admin-bio). الدخول بالبصمة = فكّها ثم الدخول المعتاد بها.
+// تغيير كلمة المرور يُبطل المحفوظ، ويبقى المفتاح فيُعاد التفعيل ببصمة واحدة. «خروج» لا يمسّها.
+const BIO_KEY = 'dh:admin-bio';
+const BIO_SKIP = 'dh:admin-bio-skip';
+const b64u = {
+  enc: (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
+  dec: (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0)),
+};
+// أيقونة مضمّنة لا من ملف الأيقونات: ذاك يُخزَّن يوماً كاملاً فقد تغيب عنه أيقونة جديدة
+const FP = (cls = '') => `<svg class="ico ${cls}" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12v8"/><path d="M9 19.5V12a3 3 0 0 1 6 0v4.5"/><path d="M6 16.5V12a6 6 0 0 1 12 0v6"/><path d="M3 13.5V12a9 9 0 0 1 18 0v1.5"/></svg>`;
+const bioErr = (code) => Object.assign(new Error(code), { code });
+const bio = {
+  get() { const b = store.get(BIO_KEY); return b && b.v === 1 && b.id && b.salt ? b : null; },
+  /** البصمة مفعّلة على هذا الجهاز (كلمة المرور محفوظة مشفّرة) */
+  ready() { const b = this.get(); return !!(b && b.ct && window.PublicKeyCredential); },
+  async supported() {
+    if (!window.PublicKeyCredential || !window.isSecureContext || !navigator.credentials || !crypto.subtle) return false;
+    try {
+      const c = PublicKeyCredential.getClientCapabilities ? await PublicKeyCredential.getClientCapabilities() : {};
+      if (c['extension:prf'] === false) return false;
+      return await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
+    } catch { return false; }
+  },
+  /** مفتاح التشفير بعد البصمة: يُنشئ مفتاح المرور أول مرة، ثم يطلب سرّه بالبصمة (أو يأخذه من الإنشاء نفسه) */
+  async key() {
+    let b = this.get();
+    let res = null;
+    if (!b) {
+      const salt = crypto.getRandomValues(new Uint8Array(32));
+      const c = await navigator.credentials.create({ publicKey: {
+        rp: { name: 'دليل حماة — الإدارة' },
+        user: { id: crypto.getRandomValues(new Uint8Array(16)), name: 'مدير دليل حماة', displayName: 'مدير دليل حماة' },
+        challenge: crypto.getRandomValues(new Uint8Array(32)),
+        pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
+        authenticatorSelection: { authenticatorAttachment: 'platform', residentKey: 'preferred', userVerification: 'required' },
+        timeout: 120000,
+        extensions: { prf: { eval: { first: salt } } },
+      } });
+      const prf = c.getClientExtensionResults().prf;
+      if (!prf || !(prf.enabled || prf.results)) { forgetCredential(b64u.enc(c.rawId)); throw bioErr('unsupported'); }
+      b = { v: 1, id: b64u.enc(c.rawId), salt: b64u.enc(salt), tr: (c.response.getTransports && c.response.getTransports()) || [] };
+      store.set(BIO_KEY, b); // يبقى المفتاح لو تعثّر ما بعده، فلا يُنشأ مفتاح ثانٍ في المحاولة التالية
+      res = prf.results;
+    }
+    if (!(res && res.first)) {
+      const a = await navigator.credentials.get({ publicKey: {
+        challenge: crypto.getRandomValues(new Uint8Array(32)),
+        allowCredentials: [{ type: 'public-key', id: b64u.dec(b.id), ...(b.tr && b.tr.length ? { transports: b.tr } : {}) }],
+        userVerification: 'required',
+        timeout: 120000,
+        extensions: { prf: { eval: { first: b64u.dec(b.salt) } } },
+      } });
+      res = (a.getClientExtensionResults().prf || {}).results;
+    }
+    if (!(res && res.first)) throw bioErr('unsupported');
+    const base = await crypto.subtle.importKey('raw', res.first, 'HKDF', false, ['deriveKey']);
+    return crypto.subtle.deriveKey({ name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: new TextEncoder().encode('dalil-hama admin password v1') },
+      base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  },
+  async seal(key, password) {
+    const b = this.get();
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: b64u.dec(b.id) }, key, new TextEncoder().encode(password));
+    store.set(BIO_KEY, { ...b, iv: b64u.enc(iv), ct: b64u.enc(ct) });
+    store.del(BIO_SKIP);
+  },
+  async password() {
+    if (!this.ready()) throw bioErr('broken'); // لا يُنشأ مفتاح جديد عند الدخول
+    const key = await this.key();
+    const b = this.get();
+    try {
+      return new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64u.dec(b.iv), additionalData: b64u.dec(b.id) }, key, b64u.dec(b.ct)));
+    } catch { this.drop(); throw bioErr('broken'); }
+  },
+  /** إبطال كلمة المرور المحفوظة مع إبقاء مفتاح المرور (بعد تغيير كلمة المرور) */
+  drop() { const b = this.get(); if (b) store.set(BIO_KEY, { v: 1, id: b.id, salt: b.salt, tr: b.tr }); },
+  /** إيقاف البصمة على هذا الجهاز كلياً */
+  off() { const b = this.get(); store.del(BIO_KEY); if (b) forgetCredential(b.id); },
+};
+// يُبلغ مدير كلمات المرور في الجهاز أن المفتاح لم يعد مستعملاً فيزيله (إن كان المتصفح يدعم ذلك)
+function forgetCredential(id) {
+  try {
+    const p = PublicKeyCredential.signalUnknownCredential && PublicKeyCredential.signalUnknownCredential({ rpId: location.hostname, credentialId: id });
+    if (p) p.catch(() => {});
+  } catch { /* ignore */ }
+}
+function bioMsg(e) {
+  if (e && e.name === 'NotAllowedError') return 'لم تكتمل البصمة. حاول مرة أخرى، أو ادخل بكلمة المرور.';
+  if (e && e.code === 'unsupported') return 'هذا الجهاز أو المتصفح لا يدعم الدخول بالبصمة؛ يبقى الدخول بكلمة المرور.';
+  if (e && e.code === 'broken') return 'تعذّر فتح البصمة المحفوظة. ادخل بكلمة المرور ثم فعّلها من جديد.';
+  if (e && e.code === 'changed') return 'تغيّرت كلمة المرور بعد تفعيل البصمة. ادخل بكلمة المرور الجديدة، ثم فعّل البصمة من جديد.';
+  if (e instanceof ApiError) return e.status === 400 ? 'كلمة المرور غير صحيحة.' : errMsg(e);
+  return `تعذّر استخدام البصمة على هذا الجهاز${e && e.name && e.name !== 'Error' ? ` (${e.name})` : ''}.`;
+}
+/** بعد الدخول بكلمة المرور: عرض تفعيل البصمة مرة واحدة على الجهاز الذي يدعمها */
+async function bioOffer(password) {
+  if (!A.me || bio.ready() || store.get(BIO_SKIP) || !(await bio.supported())) return;
+  const ok = await confirmBox(`<b>${FP()} الدخول بالبصمة</b><br>هل تريد الدخول في المرات القادمة ببصمة هذا الجهاز بدل كتابة كلمة المرور؟`, { ok: 'تفعيل البصمة', cancel: 'ليس الآن' });
+  if (!ok) { store.set(BIO_SKIP, 1); toast('يمكنك تفعيلها متى شئت من «الإعدادات»'); return; }
+  try {
+    await bio.seal(await bio.key(), password);
+    toast('تم تفعيل الدخول بالبصمة ✓');
+  } catch (e) { toast(bioMsg(e), true); }
+  renderBioPanel();
+}
+
 function renderLogin(msg = '') {
+  const fp = bio.ready();
   $('#app').innerHTML = `<div class="login"><form class="login-card form" id="login-form">
       <div class="brand"><span class="mark"><svg viewBox="0 0 64 64"><use href="${ICONS}#noria"/></svg></span><span>دليل حماة<small>لوحة الإدارة</small></span></div>
       <div><h1>تسجيل الدخول</h1><p>هذه الصفحة مخصصة لفريق إدارة الدليل.</p></div>
+      ${fp ? `<button class="btn btn-primary btn-lg btn-block" type="button" id="bio-login">${FP()}الدخول بالبصمة</button><div class="login-or">أو بكلمة المرور</div>` : ''}
       <input type="text" name="username" value="مدير دليل حماة" autocomplete="username" hidden>
-      <label class="field"><span>كلمة المرور</span>${pwInput('name="password" autocomplete="current-password" autofocus required')}</label>
+      <label class="field"><span>كلمة المرور</span>${pwInput(`name="password" autocomplete="current-password" ${fp ? '' : 'autofocus'} required`)}</label>
       <div class="form-error" ${msg ? '' : 'hidden'}>${esc(msg)}</div>
-      <button class="btn btn-primary btn-lg btn-block" type="submit">دخول</button>
+      <button class="btn ${fp ? 'btn-soft' : 'btn-primary'} btn-lg btn-block" type="submit">دخول</button>
       <a class="btn btn-ghost btn-block" href="/">${I('back', 'sm')}العودة إلى الدليل</a>
     </form></div>`;
+  const bb = $('#bio-login');
+  if (bb) {
+    bb.addEventListener('click', async () => {
+      bb.disabled = true;
+      let pw;
+      try { pw = await bio.password(); } catch (err) { renderLogin(bioMsg(err)); return; }
+      bb.innerHTML = `${FP()}جارٍ الدخول…`;
+      try {
+        await auth.login(pw);
+        await start();
+      } catch (err) {
+        dropSession();
+        if (err.status === 400) { bio.drop(); renderLogin(bioMsg(bioErr('changed'))); return; }
+        renderLogin(errMsg(err));
+      }
+    });
+  }
   $('#login-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
@@ -291,8 +419,10 @@ function renderLogin(msg = '') {
     btn.disabled = true;
     btn.textContent = 'جارٍ الدخول…';
     try {
-      await auth.login(fd.get('password'));
+      const pw = fd.get('password');
+      await auth.login(pw);
       await start();
+      bioOffer(pw);
     } catch (err) {
       dropSession();
       btn.disabled = false;
@@ -405,6 +535,7 @@ function viewDiag(el) {
 const onView = (v) => (location.hash.slice(1).split('?')[0].split('/')[0] || 'dash') === v;
 
 function route() {
+  if (!$('#content')) return; // شاشة الدخول ظاهرة (بعد الخروج أو انتهاء الجلسة): لا شاشة إدارة لنرسمها
   const dl = deepLink();
   let v = location.hash.slice(1).split('?')[0].split('/')[0] || 'dash';
   if (dl) v = 'listings';
@@ -464,7 +595,9 @@ async function start() {
     route();
   } catch (e) {
     if (e.status === 401 || e.status === 400) { dropSession(); return renderLogin(); }
-    $('#app').innerHTML = `<div class="login"><div class="login-card"><h1>تعذّر التحميل</h1><p>${esc(errMsg(e))}</p><button class="btn btn-primary btn-block" onclick="location.reload()">إعادة المحاولة</button></div></div>`;
+    // بلا onclick مضمّن: سياسة أمان الصفحة (CSP) تمنعه فلا يعمل الزر
+    $('#app').innerHTML = `<div class="login"><div class="login-card"><h1>تعذّر التحميل</h1><p>${esc(errMsg(e))}</p><button class="btn btn-primary btn-block" type="button" id="retry">إعادة المحاولة</button></div></div>`;
+    $('#retry').addEventListener('click', () => location.reload());
   }
 }
 
@@ -535,11 +668,11 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && sheet && !document.querySelector('dialog[open]')) closeSheet();
 });
 
-function confirmBox(msg, { ok = 'تأكيد', danger = false } = {}) {
+function confirmBox(msg, { ok = 'تأكيد', cancel = 'إلغاء', danger = false } = {}) {
   return new Promise((resolve) => {
     const d = document.createElement('dialog');
     d.className = 'confirm';
-    d.innerHTML = `<p>${msg}</p><form method="dialog" class="confirm-ops"><button value="ok" class="btn ${danger ? 'btn-danger' : 'btn-primary'}">${ok}</button><button value="" class="btn btn-soft"${danger ? ' autofocus' : ''}>إلغاء</button></form>`;
+    d.innerHTML = `<p>${msg}</p><form method="dialog" class="confirm-ops"><button value="ok" class="btn ${danger ? 'btn-danger' : 'btn-primary'}">${ok}</button><button value="" class="btn btn-soft"${danger ? ' autofocus' : ''}>${cancel}</button></form>`;
     document.body.append(d);
     d.addEventListener('close', () => { resolve(d.returnValue === 'ok'); d.remove(); });
     d.addEventListener('click', (e) => { if (e.target === d) d.close(''); });
@@ -688,7 +821,7 @@ function viewDash(el) {
 const isCand = (r) => r.status === 'pending' && r.source !== 'public';
 const CONSENT_MSG = (name, link) => `السلام عليكم ورحمة الله،\nنحن فريق «دليل حماة — حماة بين يديك»، دليل إلكتروني مجاني لأهل المدينة.\nيسعدنا إدراج «${name}» (الاسم والتصنيف والرقم فقط) في الدليل، ولن نضيفه إلا بموافقتكم.\n${link ? `👈 للموافقة أو الرفض بضغطة واحدة:\n${link}\nوإن لم يكن هذا الرقم لكم فاختاروا «الرقم خطأ» فيُحذف فوراً.\nويمكنكم أيضاً الرد بكلمة «موافق».` : '✅ للموافقة أرسلوا كلمة «موافق».'}\n❌ وإن لم ترغبوا فلا حاجة للرد، ولن يُنشر شيء.\nويمكنكم طلب التعديل أو الحذف في أي وقت.${link ? '' : '\nالموقع: https://dalil-hama.majid.cfd'}\nشاكرين لكم 🌿`;
 /** رابط شخصي لصاحب الرقم (migration 0012): رمز عشوائي 128 بت يوضع في الرسالة، ولا يُسجَّل في القاعدة إلا لحظة فتح واتساب */
-const ownerToken = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16)))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const ownerToken = () => b64u.enc(crypto.getRandomValues(new Uint8Array(16)));
 const ownerLink = (t) => `${location.origin}/r/#${t}`;
 function registerOwnerLink(id, phone, token) {
   api('/rest/v1/rpc/admin_owner_link', { method: 'POST', body: { p_listing: id, p_phone: phone, p_token: token }, keepalive: true })
@@ -1870,7 +2003,9 @@ function viewSettings(el) {
         <div class="full"><button class="btn btn-primary" ${owner ? '' : 'disabled'}>حفظ</button></div></form></div>
     <div class="panel"><h2>${I('settings')}تغيير كلمة المرور</h2>
       <form class="form-grid two" id="s-pw"><label class="field"><span>كلمة المرور الجديدة (8 أحرف على الأقل)</span>${pwInput('name="password" minlength="8" required autocomplete="new-password"')}</label>
-        <div class="field" style="align-self:end"><button class="btn btn-primary">تحديث</button></div></form></div>`;
+        <div class="field" style="align-self:end"><button class="btn btn-primary">تحديث</button></div></form></div>
+    <div class="panel" id="s-bio"><h2>${FP()}الدخول بالبصمة</h2><p class="muted">…</p></div>`;
+  renderBioPanel();
   const saveSetting = async (key, value) => {
     try {
       await rest('settings?on_conflict=key', { method: 'POST', body: { key, value, is_public: true }, headers: { Prefer: 'resolution=merge-duplicates,return=minimal' } });
@@ -1889,11 +2024,66 @@ function viewSettings(el) {
   };
   $('#s-pw').onsubmit = async (e) => {
     e.preventDefault();
+    const pw = new FormData(e.target).get('password');
     try {
-      await api('/auth/v1/user', { method: 'PUT', body: { password: new FormData(e.target).get('password') } });
+      await api('/auth/v1/user', { method: 'PUT', body: { password: pw } });
       e.target.reset();
-      toast('تم تغيير كلمة المرور ✓');
+      // البصمة تحفظ كلمة المرور القديمة: تُبطل، ويُملأ نموذج إعادة تفعيلها بالجديدة فيكفي زر وبصمة
+      if (bio.ready()) { bio.drop(); renderBioPanel(pw); toast('تم تغيير كلمة المرور ✓ — اضغط «تفعيل البصمة» لتعمل بالكلمة الجديدة'); }
+      else toast('تم تغيير كلمة المرور ✓');
     } catch (err) { toast(errMsg(err), true); }
+  };
+}
+
+/** قسم «الدخول بالبصمة» في الإعدادات: حالته على هذا الجهاز، وتفعيله بكلمة المرور الحالية، وإيقافه */
+async function renderBioPanel(prefill = '') {
+  const el = $('#s-bio');
+  if (!el) return;
+  const head = `<h2>${FP()}الدخول بالبصمة</h2>`;
+  if (bio.ready()) {
+    el.innerHTML = `${head}<p class="muted">مفعّل على هذا الجهاز ✓. حين يُطلب الدخول اضغط «الدخول بالبصمة» وضع إصبعك.</p>
+      <button class="btn btn-soft" type="button" id="bio-off">إيقاف البصمة على هذا الجهاز</button>`;
+    $('#bio-off').onclick = async () => {
+      if (!(await confirmBox('إيقاف الدخول بالبصمة على هذا الجهاز؟ يبقى الدخول بكلمة المرور كما هو.', { ok: 'إيقاف' }))) return;
+      bio.off();
+      toast('أُوقف الدخول بالبصمة على هذا الجهاز');
+      renderBioPanel();
+    };
+    return;
+  }
+  const ok = await bio.supported();
+  if ($('#s-bio') !== el) return; // تغيّرت الشاشة أثناء الانتظار
+  if (!ok) {
+    el.innerHTML = `${head}<p class="muted">هذا المتصفح لا يدعم الدخول بالبصمة. البديل: اسمح للمتصفح بحفظ كلمة المرور حين يعرض ذلك، فيملؤها لك في المرة القادمة.</p>`;
+    return;
+  }
+  el.innerHTML = `${head}<form class="form-grid two" id="bio-on">
+      <label class="field"><span>كلمة المرور الحالية (مرة واحدة للتفعيل)</span>${pwInput('name="password" required autocomplete="current-password"')}</label>
+      <div class="field" style="align-self:end"><button class="btn btn-primary">${FP('sm')}تفعيل البصمة</button></div>
+      <p class="hint full">تُحفظ كلمة المرور مشفّرة على هذا الجهاز وحده، ولا تُفتح إلا ببصمتك.</p></form>`;
+  if (prefill) $('#bio-on [name=password]').value = prefill;
+  $('#bio-on').onsubmit = async (e) => {
+    e.preventDefault();
+    const pw = new FormData(e.target).get('password');
+    const btn = e.target.querySelector('.btn-primary');
+    btn.disabled = true;
+    try {
+      const key = await bio.key(); // البصمة أولاً ما دامت ضغطة الزر حديثة (بعض المتصفحات ترفضها بعد انتظار الشبكة)
+      let id;
+      try {
+        id = await request('/rest/v1/rpc/admin_login_hint', { method: 'POST', body: { p_password: pw } });
+      } catch (err) {
+        if (/too_many_attempts/.test(err.message || '')) throw new ApiError('محاولات كثيرة خاطئة. انتظر 15 دقيقة ثم أعد المحاولة.', 429);
+        throw err;
+      }
+      if (!id) throw new ApiError('كلمة المرور غير صحيحة.', 400);
+      await bio.seal(key, pw);
+      toast('تم تفعيل الدخول بالبصمة ✓');
+      renderBioPanel();
+    } catch (err) {
+      btn.disabled = false;
+      toast(bioMsg(err), true);
+    }
   };
 }
 

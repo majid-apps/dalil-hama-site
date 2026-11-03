@@ -206,3 +206,8 @@ dialog.confirm p { margin: 0 0 18px; font-size: 16px; line-height: 1.7; }
 .pw-eye { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); width: 42px; height: 42px; display: grid; place-items: center;
   border: 0; border-radius: 12px; background: transparent; color: var(--muted); cursor: pointer; }
 .pw-eye:hover, .pw-eye:focus-visible { background: var(--surface-2); color: var(--ink); }
+
+/* الدخول بالبصمة */
+.login-or { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; }
+.login-or::before, .login-or::after { content: ''; flex: 1; height: 1px; background: var(--line); }
+dialog.confirm p b .ico { vertical-align: -5px; color: var(--brand); }
