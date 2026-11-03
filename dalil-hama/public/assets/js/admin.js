@@ -259,11 +259,27 @@ function removeLocal(id) { removeMany([id]); }
 
 // ─────────────── الدخول ───────────────
 
+/** حقل كلمة مرور بزر «عين» لإظهارها وإخفائها */
+const pwInput = (attrs) => `<span class="pw-wrap"><input class="input" type="password" dir="ltr" ${attrs}><button class="pw-eye" type="button" aria-label="إظهار كلمة المرور" title="إظهار كلمة المرور">${I('eye', 'sm')}</button></span>`;
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('.pw-eye');
+  if (!b) return;
+  e.preventDefault();
+  const inp = b.parentElement.querySelector('input');
+  const show = inp.type === 'password';
+  inp.type = show ? 'text' : 'password';
+  b.innerHTML = I(show ? 'eye-off' : 'eye', 'sm');
+  b.setAttribute('aria-label', show ? 'إخفاء كلمة المرور' : 'إظهار كلمة المرور');
+  b.title = b.getAttribute('aria-label');
+  inp.focus();
+});
+
 function renderLogin(msg = '') {
   $('#app').innerHTML = `<div class="login"><form class="login-card form" id="login-form">
       <div class="brand"><span class="mark"><svg viewBox="0 0 64 64"><use href="${ICONS}#noria"/></svg></span><span>دليل حماة<small>لوحة الإدارة</small></span></div>
       <div><h1>تسجيل الدخول</h1><p>هذه الصفحة مخصصة لفريق إدارة الدليل.</p></div>
-      <label class="field"><span>كلمة المرور</span><input class="input" name="password" type="password" dir="ltr" autocomplete="current-password" autofocus required></label>
+      <input type="text" name="username" value="مدير دليل حماة" autocomplete="username" hidden>
+      <label class="field"><span>كلمة المرور</span>${pwInput('name="password" autocomplete="current-password" autofocus required')}</label>
       <div class="form-error" ${msg ? '' : 'hidden'}>${esc(msg)}</div>
       <button class="btn btn-primary btn-lg btn-block" type="submit">دخول</button>
       <a class="btn btn-ghost btn-block" href="/">${I('back', 'sm')}العودة إلى الدليل</a>
@@ -346,7 +362,7 @@ function renderShell() {
   scrim.addEventListener('click', closeMenu);
   $('#nav').addEventListener('click', closeMenu);
   $('#logout').addEventListener('click', async () => {
-    try { await api('/auth/v1/logout', { method: 'POST' }); } catch { /* ignore */ }
+    try { await api('/auth/v1/logout?scope=local', { method: 'POST' }); } catch { /* ignore */ } // هذا الجهاز فقط
     dropSession();
     renderLogin();
   });
@@ -1853,7 +1869,7 @@ function viewSettings(el) {
         <label class="field full"><span>فيسبوك (رابط)</span><input class="input" name="facebook" dir="ltr" value="${esc(c.facebook || '')}"></label>
         <div class="full"><button class="btn btn-primary" ${owner ? '' : 'disabled'}>حفظ</button></div></form></div>
     <div class="panel"><h2>${I('settings')}تغيير كلمة المرور</h2>
-      <form class="form-grid two" id="s-pw"><label class="field"><span>كلمة المرور الجديدة (10 أحرف على الأقل)</span><input class="input" name="password" type="password" dir="ltr" minlength="10" required autocomplete="new-password"></label>
+      <form class="form-grid two" id="s-pw"><label class="field"><span>كلمة المرور الجديدة (8 أحرف على الأقل)</span>${pwInput('name="password" minlength="8" required autocomplete="new-password"')}</label>
         <div class="field" style="align-self:end"><button class="btn btn-primary">تحديث</button></div></form></div>`;
   const saveSetting = async (key, value) => {
     try {
