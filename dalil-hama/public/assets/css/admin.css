@@ -199,3 +199,10 @@ dialog.confirm p { margin: 0 0 18px; font-size: 16px; line-height: 1.7; }
 .task small { font-weight: 400; font-size: 12px; color: var(--muted); }
 .task.on { background: var(--brand-soft); border-color: transparent; color: var(--ink); }
 .task.on .ico, .task.on b { color: var(--brand); }
+
+/* حقل كلمة المرور بزر «عين» */
+.pw-wrap { position: relative; display: block; }
+.pw-wrap .input { padding-right: 52px; }
+.pw-eye { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); width: 42px; height: 42px; display: grid; place-items: center;
+  border: 0; border-radius: 12px; background: transparent; color: var(--muted); cursor: pointer; }
+.pw-eye:hover, .pw-eye:focus-visible { background: var(--surface-2); color: var(--ink); }
