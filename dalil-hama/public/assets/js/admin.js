@@ -1045,7 +1045,7 @@ function viewExcluded(el) {
       ${rows.length ? `<button class="btn btn-soft" type="button" id="ex-dl" style="margin-bottom:10px">${I('download', 'sm')}تحميل الأرقام المستبعدة (CSV)</button>` : ''}
       ${rows.length ? rows.map((x) => `<div class="row"><span class="avatar" style="width:40px;height:40px;font-size:20px;border-radius:12px">⛔</span>
         <div style="min-width:0"><div class="nm"><bdi dir="ltr">${esc(formatPhone(x.phone))}</bdi></div><div class="sub"><span>${esc(x.name || 'بلا بطاقة')}</span>${x.note ? `<span>${esc(x.note)}</span>` : ''}<span>${timeAgo(x.created_at)}</span></div></div>
-        <div class="ops"><button class="btn btn-soft" type="button" data-unex="${esc(x.phone)}">إعادة السماح</button></div></div>`).join('') : '<div class="empty"><p>لا أرقام مستبعدة.</p></div>'}</div>`;
+        <div class="ops">${(x.removed_from || []).length ? `<button class="btn btn-primary" type="button" data-back="${esc(x.phone)}">${I('history', 'sm')}إعادة الرقم لبطاقته</button>` : ''}<button class="btn btn-soft" type="button" data-unex="${esc(x.phone)}">إعادة السماح فقط</button></div></div>`).join('') : '<div class="empty"><p>لا أرقام مستبعدة.</p></div>'}</div>`;
   const dl = $('#ex-dl', el);
   if (dl) dl.onclick = () => {
     const q = (v) => { const t = String(v ?? ''); return /[",\n\r]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
@@ -1067,10 +1067,30 @@ function viewExcluded(el) {
     } catch (err) { toast(errMsg(err), true); btn.disabled = false; }
   });
   el.onclick = async (e) => {
+    const bk = e.target.closest('[data-back]');
+    if (bk) {
+      const ph = bk.dataset.back;
+      if (!(await confirmBox(`إعادة الرقم <b dir="ltr">${esc(formatPhone(ph))}</b> إلى بطاقته وإزالته من المستبعدين؟`, { ok: 'إعادة الرقم' }))) return;
+      try {
+        const ids = await rpc('admin_restore_phone', { p_phone: ph });
+        const [rows, ex] = await Promise.all([
+          ids && ids.length ? rest(`listings?select=*&id=in.(${ids.join(',')})`) : [],
+          rest('excluded_phones?select=*&order=created_at.desc'),
+        ]);
+        upsertMany(rows);
+        setExcluded(ex);
+        refreshStats();
+        cache.later();
+        toast(ids && ids.length ? `أُعيد الرقم إلى ${fmtNum(ids.length)} بطاقة ✓` : 'أُزيل من المستبعدين');
+        renderNavCounts();
+        viewExcluded(el);
+      } catch (err) { toast(errMsg(err), true); }
+      return;
+    }
     const b = e.target.closest('[data-unex]');
     if (!b) return;
     const ph = b.dataset.unex;
-    if (!(await confirmBox(`إعادة السماح بالرقم <b dir="ltr">${esc(formatPhone(ph))}</b>؟ سيمكن نشره واستيراده من جديد (لا يعود تلقائياً إلى بطاقته القديمة).`, { ok: 'إعادة السماح' }))) return;
+    if (!(await confirmBox(`إعادة السماح بالرقم <b dir="ltr">${esc(formatPhone(ph))}</b>؟ سيمكن نشره واستيراده من جديد (ولا يعود إلى بطاقته؛ لإعادته إليها استعمل «إعادة الرقم لبطاقته»).`, { ok: 'إعادة السماح' }))) return;
     try {
       await rest(`excluded_phones?phone=eq.${encodeURIComponent(ph)}`, { method: 'DELETE' });
       setExcluded(A.excluded.filter((x) => x.phone !== ph));
