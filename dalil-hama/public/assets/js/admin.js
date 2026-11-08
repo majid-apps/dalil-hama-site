@@ -616,7 +616,11 @@ function rowOps(r) {
   const wa = r.whatsapp || (ph && isMobile(ph) && !r.no_whatsapp ? ph : '');
   const map = safeUrl(r.map_url) || (r.lat && r.lng ? `https://www.google.com/maps/search/?api=1&query=${r.lat},${r.lng}` : '');
   const ib = (href, ic, label, extra = '') => `<a class="icon-btn" href="${href}" aria-label="${label}" title="${label}" ${extra}>${I(ic, 'sm')}</a>`;
-  return `${ph ? ib(telHref(ph), 'phone', 'اتصال') : ''}${wa ? ib(waHref(wa), 'wa', 'واتساب', 'target="_blank" rel="noopener"') : ''}${map ? ib(esc(map), 'map', 'الخريطة', 'target="_blank" rel="noopener"') : ''}`
+  // رسالة إشعار صاحب الرقم (الصيغة المعتمدة + رابط التعديل/الحذف/الإبلاغ) لأي بطاقة، لا للمرشحين وحدهم
+  const mob = (r.phones || []).find(isMobile);
+  const tok = mob ? ownerToken() : '';
+  const notice = mob ? ib(waHref(mob, CONSENT_MSG(r, ownerLink(tok))), 'megaphone', 'إشعار صاحب الرقم', `target="_blank" rel="noopener" data-owner="${r.id}" data-ph="${esc(mob)}" data-tok="${tok}"`) : '';
+  return `${ph ? ib(telHref(ph), 'phone', 'اتصال') : ''}${wa ? ib(waHref(wa), 'wa', 'واتساب', 'target="_blank" rel="noopener"') : ''}${notice}${map ? ib(esc(map), 'map', 'الخريطة', 'target="_blank" rel="noopener"') : ''}`
     + `${ib(`/?l=${r.id}`, 'eye', 'عرض في الدليل')}`
     + `<button class="icon-btn" type="button" data-mergerow="${r.id}" aria-label="دمج مع بطاقة أخرى" title="دمج">${I('merge', 'sm')}</button>`
     + `<button class="icon-btn danger" type="button" data-delrow="${r.id}" aria-label="حذف" title="حذف">${I('trash', 'sm')}</button>`
@@ -2128,6 +2132,8 @@ function emRow(e) {
 
 document.addEventListener('click', async (e) => {
   if (!A.me) return;
+  const own = e.target.closest('[data-tok]');
+  if (own) registerOwnerLink(Number(own.dataset.owner), own.dataset.ph, own.dataset.tok);
   const ed = e.target.closest('[data-edit]');
   if (ed) { e.preventDefault(); editListing(Number(ed.dataset.edit)); return; }
   const mg = e.target.closest('[data-mergerow]');
