@@ -15,7 +15,7 @@ const PAGE = 36;
  *  رابط صاحب الرقم الخاص (تعديل/حذف) يُرسل من زر «إشعار صاحب الرقم» في الإدارة وحدها، فلا يُولَّد رمز لأي زائر. */
 const waMsg = (it) => {
   const map = mapHref(it);
-  return `السلام عليكم ورحمة الله وبركاته 🌿\nحصلنا على رقمكم باسم «${it.n}»\n${it.p && it.p.length ? `أرقامكم: ${it.p.join('، ')}\n` : ''}${it.d ? `عنوانكم: ${it.d}\n` : ''}${map ? `موقعكم: ${map}\n` : ''}من تطبيق «دليل حماة بين يديك»،\nفإن كان هناك أي معلومة خاطئة فيمكنكم:\n✏️ تعديلها\nأو 🗑 حذفها\nأو 🚩 إبلاغنا\n👈 ${location.origin}/?l=${it.i}\nشاكرين لكم تعاونكم وتفهمكم 🌿`;
+  return `السلام عليكم ورحمة الله وبركاته 🌿\nحصلنا على رقمكم باسم «${it.n}»\n${it.p && it.p.length ? `أرقامكم: ${it.p.join('، ')}\n` : ''}${it.d ? `عنوانكم: ${it.d}\n` : ''}${map ? `موقعكم: ${map}\n` : ''}من تطبيق «دليل حماة بين يديك»،\nفإن كان هناك أي معلومة خاطئة فيمكنكم:\n✏️ تعديلها\nأو 🗑 حذفها\nأو 🚩 إبلاغنا\n👈 ${location.origin}/?l=${it.i}&fix=1\nشاكرين لكم تعاونكم وتفهمكم 🌿`;
 };
 
 const QUICK = [
@@ -118,7 +118,7 @@ function params() {
   const g = (k) => u.searchParams.get(k) || '';
   return {
     q: g('q'), c: Number(g('c')) || null, a: g('a'), v: g('v'), s: g('s'), m: g('m') === '1',
-    l: Number(g('l')) || null, hash: routerHash(u.hash),
+    l: Number(g('l')) || null, fix: g('fix') === '1', hash: routerHash(u.hash),
   };
 }
 
@@ -175,7 +175,7 @@ function sync() {
   if (want !== (openSheetKey || '')) {
     if (openSheetKey) hideSheet();
     if (want && state.loaded) {
-      if (p.l) openItem(p.l);
+      if (p.l) openItem(p.l, p.fix);
       else if (want === 'add') openAdd();
       else openReport(p.hash);
     }
@@ -580,7 +580,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 // تفاصيل النشاط
-function openItem(id) {
+function openItem(id, fix = false) {
   const it = state.byId.get(id);
   if (!it) {
     showSheet(`item:${id}`, 'غير موجود', `<div class="empty"><div class="big">🧐</div><p>هذا النشاط لم يعد موجوداً في الدليل أو قيد المراجعة.</p><a class="btn btn-primary" href="/">الرئيسية</a></div>`);
@@ -598,6 +598,25 @@ function openItem(id) {
     </div>`).join('');
   const waExtra = wa && !(it.p || []).includes(wa)
     ? `<div class="phone-row"><div class="num"><bdi dir="ltr">${esc(formatPhone(wa))}</bdi><span class="kind">واتساب</span></div><a class="btn btn-wa" href="${waHref(wa, waMsg(it))}" target="_blank" rel="noopener" data-act="whatsapp">${I('wa', 'sm')}مراسلة</a></div>` : '';
+  if (fix) {
+    // عرض صاحب النشاط القادم من رسالة واتساب: بيانات البطاقة للتحقق فقط، وثلاثة خيارات: الرقم خطأ، يحتاج تعديل، إبلاغ
+    const fixBody = `<div data-id="${it.i}">
+      <div class="detail-hero" style="--hue:${catHue(cat)}"><div class="avatar" aria-hidden="true">${cat ? cat.ic : '📍'}</div>
+        <div style="min-width:0"><h3>${esc(it.n)}</h3>${cat ? `<div class="tags"><span class="tag brand">${esc(cat.n)}</span></div>` : ''}</div></div>
+      <div class="block"><p class="block-title">بيانات بطاقتكم في الدليل</p>
+        ${(it.p || []).map((x) => `<div class="info-row">${I('phone')}<div class="grow"><bdi dir="ltr">${esc(x)}</bdi></div></div>`).join('') || '<div class="info-row"><div class="grow">لا يوجد رقم</div></div>'}
+        ${it.d || it.a ? `<div class="info-row">${I('pin')}<div class="grow">${esc(it.d || `حماة، ${it.a}`)}</div></div>` : ''}
+      </div>
+      <p style="color:var(--ink-2);margin:4px 0 12px">إن كان فيها أي معلومة خاطئة فاختاروا ما يناسب:</p>
+      <div class="detail-actions" style="grid-template-columns:1fr">
+        <button class="qa" type="button" data-act="report" data-kind="wrong_number">${I('x')}الرقم خطأ</button>
+        <button class="qa" type="button" data-act="report" data-kind="wrong_info">${I('edit')}يحتاج تعديل</button>
+        <button class="qa" type="button" data-act="report" data-kind="other">${I('flag')}إبلاغ</button>
+      </div></div>`;
+    showSheet(`item:${id}`, 'بطاقتكم في الدليل', fixBody, { label: it.n });
+    document.title = `${it.n} — دليل حماة`;
+    return;
+  }
   const body = `<div data-id="${it.i}">
     <div class="detail-hero" style="--hue:${catHue(cat)}">
       <div class="avatar" aria-hidden="true">${cat ? cat.ic : '📍'}</div>
@@ -894,7 +913,7 @@ document.addEventListener('click', (e) => {
     const sp = u.searchParams;
     const next = {
       q: sp.get('q') || '', c: Number(sp.get('c')) || null, a: sp.get('a') || '', v: sp.get('v') || '',
-      s: sp.get('s') || '', m: sp.get('m') === '1', l: Number(sp.get('l')) || null, hash: routerHash(u.hash),
+      s: sp.get('s') || '', m: sp.get('m') === '1', l: Number(sp.get('l')) || null, fix: sp.get('fix') === '1', hash: routerHash(u.hash),
     };
     if (u.hash && !u.search && a.getAttribute('href').startsWith('#')) {
       go({ hash: routerHash(u.hash), l: null }, { keep: true, push: !history.state?.sheet });
