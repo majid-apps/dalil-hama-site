@@ -29,13 +29,12 @@ const fail = (code) => state('⚠️', 'تعذّر الإكمال', ERR[code] ||
   code ? '' : '<button class="btn btn-soft btn-lg" type="button" data-act="retry">إعادة المحاولة</button>');
 
 function head() {
-  return `<h1>طلب نشر في «دليل حماة»</h1>
+  return `<h1>بطاقتكم في «دليل حماة»</h1>
     <p class="o-biz">${esc(info.name)}</p>${info.category ? `<p class="o-cat">${esc(info.category)}</p>` : ''}
     <bdi class="o-num" dir="ltr">${esc(formatPhone(info.phone))}</bdi>`;
 }
 
-const tools = (approve) => `<div class="o-acts">
-      ${approve ? '<button class="btn btn-primary btn-lg" type="button" data-act="approve">✅ موافق، انشروا</button>' : ''}
+const tools = () => `<div class="o-acts">
       <button class="btn btn-soft btn-lg" type="button" data-act="edit">✏️ تعديل البيانات</button>
       <button class="btn btn-soft btn-lg" type="button" data-act="report">🚩 إبلاغ برسالة</button>
       <button class="btn btn-soft btn-lg" type="button" data-act="ask-reject">🗑 حذف البطاقة</button></div>`;
@@ -45,17 +44,10 @@ function render() {
     state('✅', 'حُذفت البطاقة من الدليل', 'لن يُضاف هذا الرقم إلى الدليل مرة أخرى. نعتذر عن الإزعاج، وشكراً لكم 🌿');
     return;
   }
-  if (info.action === 'approve') {
-    box.innerHTML = `${head()}${info.address ? `<p class="o-addr">📍 ${esc(info.address)}</p>` : ''}
-      <p>شكراً لكم، نشاطكم ظاهر في «دليل حماة». يمكنكم تعديل بياناته أو إبلاغنا أو حذفه في أي وقت من هذا الرابط.</p>
-      ${tools(false)}
-      <div class="o-acts" style="margin-top:10px"><a class="btn btn-soft" href="/?l=${info.id}">عرض بطاقتكم في الدليل</a></div>`;
-    return;
-  }
   box.innerHTML = `${head()}${info.address ? `<p class="o-addr">📍 ${esc(info.address)}</p>` : ''}
-    <p>حصلنا على رقمكم باسم «${esc(info.name)}» من تطبيق «دليل حماة»، الدليل الإلكتروني المجاني لمدينة حماة، ونعرض الاسم والتصنيف والرقم والعنوان فقط.</p>
-    ${tools(true)}
-    <p class="o-note">إن كان الرقم أو أي معلومة خاطئة فعدّلوها أو احذفوها أو أبلغونا بما يلزم. ولا يُنشر شيء دون موافقتكم.</p>`;
+    <p>حصلنا على رقمكم باسم «${esc(info.name)}» من تطبيق «دليل حماة»، الدليل الإلكتروني المجاني لأهل المدينة. فإن كان الرقم أو أي معلومة خاطئة أو تغيّرت، فعدّلوها أو احذفوا البطاقة أو أبلغونا برسالة.</p>
+    ${tools()}
+    ${info.published ? `<div class="o-acts" style="margin-top:10px"><a class="btn btn-soft" href="/?l=${info.id}">عرض البطاقة في الدليل</a></div>` : ''}`;
 }
 
 function askReject() {
