@@ -469,3 +469,8 @@ select.input { appearance: none; -webkit-appearance: none; background-image: url
 @media (min-width: 900px) { .admin-fab { bottom: 20px; } }
 
 .admin-fab.preview { background: var(--gold-2, #e6b34a); color: #241904; }
+
+.owner-box { margin-bottom: 14px; padding: 14px; border-radius: 16px; background: var(--brand-soft); display: flex; flex-direction: column; gap: 10px; font-size: 14px; }
+.owner-box p { margin: 0; }
+.owner-box-row { display: flex; gap: 8px; }
+.owner-box-row .btn { flex: 1; }

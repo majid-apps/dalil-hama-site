@@ -15,7 +15,7 @@ const PAGE = 36;
  *  رابط صاحب الرقم الخاص (تعديل/حذف) يُرسل من زر «إشعار صاحب الرقم» في الإدارة وحدها، فلا يُولَّد رمز لأي زائر. */
 const waMsg = (it) => {
   const map = mapHref(it);
-  return `السلام عليكم ورحمة الله وبركاته 🌿\nحصلنا على رقمكم باسم «${it.n}»\n${it.p && it.p.length ? `أرقامكم: ${it.p.join('، ')}\n` : ''}${it.d ? `عنوانكم: ${it.d}\n` : ''}${map ? `موقعكم: ${map}\n` : ''}من تطبيق «دليل حماة بين يديك»،\nفإن كان هناك أي معلومة خاطئة، أو لا ترغبون بظهور رقمكم:\n🚩 أبلغونا عبر الرابط التالي وسنعدّلها أو نحذفها فوراً\n👈 ${location.origin}/?l=${it.i}\nشاكرين لكم تعاونكم وتفهمكم 🌿`;
+  return `السلام عليكم ورحمة الله وبركاته 🌿\nحصلنا على رقمكم باسم «${it.n}»\n${it.p && it.p.length ? `أرقامكم: ${it.p.join('، ')}\n` : ''}${it.d ? `عنوانكم: ${it.d}\n` : ''}${map ? `موقعكم: ${map}\n` : ''}من تطبيق «دليل حماة بين يديك»،\nفإن كان هناك أي معلومة خاطئة، أو لا ترغبون بظهور رقمكم:\n🚩 أبلغونا عبر الرابط التالي وسنعدّلها أو نحذفها فوراً\n👈 ${location.origin}/?l=${it.i}&w=1\nشاكرين لكم تعاونكم وتفهمكم 🌿`;
 };
 
 const QUICK = [
@@ -598,7 +598,12 @@ function openItem(id) {
     </div>`).join('');
   const waExtra = wa && !(it.p || []).includes(wa)
     ? `<div class="phone-row"><div class="num"><bdi dir="ltr">${esc(formatPhone(wa))}</bdi><span class="kind">واتساب</span></div><a class="btn btn-wa" href="${waHref(wa, waMsg(it))}" target="_blank" rel="noopener" data-act="whatsapp">${I('wa', 'sm')}مراسلة</a></div>` : '';
+  const fromWa = new URL(location.href).searchParams.get('w') === '1';
+  const ownerBox = fromWa ? `<div class="owner-box"><p><b>وصلتكم رسالة من الدليل؟</b> اختاروا ما يناسبكم:</p>
+    ${(it.p || []).map((p) => `<button class="btn btn-danger btn-block" type="button" data-act="rmnum" data-ph="${esc(p)}">${I('x', 'sm')}الرقم خطأ — يرجى حذف <bdi dir="ltr">${esc(formatPhone(p))}</bdi></button>`).join('')}
+    <div class="owner-box-row"><button class="btn btn-soft" type="button" data-act="report" data-kind="wrong_info">${I('edit', 'sm')}تعديل</button><button class="btn btn-soft" type="button" data-act="report" data-kind="wrong_number">${I('flag', 'sm')}إبلاغ</button></div></div>` : '';
   const body = `<div data-id="${it.i}">
+    ${ownerBox}
     <div class="detail-hero" style="--hue:${catHue(cat)}">
       <div class="avatar" aria-hidden="true">${cat ? cat.ic : '📍'}</div>
       <div style="min-width:0"><h3>${esc(it.n)}${it.v ? `<span class="badge" title="موثّق">${I('verified')}</span>` : ''}</h3>
@@ -863,6 +868,22 @@ document.addEventListener('click', (e) => {
     e.preventDefault();
     if (act.dataset.kind) sessionStorage.setItem('dh:rk', act.dataset.kind);
     go({ l: null, hash: it ? `report-${it.i}` : 'report' }, { keep: true, push: !history.state?.sheet });
+    return;
+  }
+  if (actName === 'rmnum' && it) {
+    e.preventDefault();
+    const ph = act.dataset.ph;
+    if (act.disabled) return;
+    act.disabled = true;
+    rpc('request_number_removal', { p_listing: it.i, p_phone: ph }).then((res) => {
+      if (!res || !res.ok) { act.disabled = false; toast(res && res.error === 'rate' ? 'طلبات كثيرة، حاول بعد قليل' : 'تعذّر إرسال الطلب'); return; }
+      const wa = (state.settings.contact || {}).whatsapp;
+      const msg = `الرقم خطأ، يرجى حذف الرقم ${formatPhone(ph)} من بطاقة «${it.n}» (#${it.i})`;
+      const box = $('.sheet-body') || document;
+      const ob = box.querySelector('.owner-box');
+      if (ob) ob.innerHTML = `<p><b>تم إيقاف ظهور الرقم ✓</b><br>سنحذفه نهائياً بعد المراجعة. لتأكيد أنك صاحب الرقم أرسل الرسالة التالية بضغطة واحدة:</p>${wa ? `<a class="btn btn-wa btn-block" href="${waHref(wa, msg)}" target="_blank" rel="noopener">${I('wa', 'sm')}أرسل التأكيد عبر واتساب</a>` : ''}`;
+      const row = act.closest('.phone-row'); if (row) row.remove();
+    }).catch(() => { act.disabled = false; toast('تعذّر الاتصال، حاول مجدداً'); });
     return;
   }
   if (actName === 'addphone') { e.preventDefault(); go({ l: null, hash: `addphone-${id}` }, { keep: true, push: !history.state?.sheet }); return; }

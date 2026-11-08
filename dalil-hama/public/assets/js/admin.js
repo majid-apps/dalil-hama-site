@@ -1236,8 +1236,9 @@ async function excludeListing(r, after) {
   } catch (err) { toast(errMsg(err), true); }
 }
 
+const isHold = (x) => String(x.note || '').startsWith('⏳');
 function viewExcluded(el) {
-  const rows = A.excluded;
+  const rows = [...A.excluded].sort((a, b) => isHold(b) - isHold(a));
   el.innerHTML = `<div class="warnbox" style="margin-bottom:12px">${I('info', 'sm')}الأرقام هنا لا تُنشر ولا تُقبل من الزوار أو الاستيراد أبداً، إلا إذا أزلتها من القائمة بنفسك. الاستبعاد يحذف الرقم وحده من بطاقاته، وتبقى البطاقة منشورة ما دام فيها رقم آخر أو موقع أو عنوان.</div>
     <div class="panel form" id="qd-panel" style="margin-top:0"><h2>${I('trash')}حذف بطاقة بالرقم</h2>
       <p class="muted" style="margin:0">لمن ردّ عليك «حذف» من واتساب: اكتب رقمه (أو آخر أرقامه) فتظهر بطاقته، ثم احذفها نهائياً ويُستبعد رقمه.</p>
@@ -1251,7 +1252,7 @@ function viewExcluded(el) {
       ${rows.length ? `<button class="btn btn-soft" type="button" id="ex-dl" style="margin-bottom:10px">${I('download', 'sm')}تحميل الأرقام المستبعدة (CSV)</button>` : ''}
       ${rows.length ? rows.map((x) => `<div class="row"><span class="avatar" style="width:40px;height:40px;font-size:20px;border-radius:12px">⛔</span>
         <div style="min-width:0"><div class="nm"><bdi dir="ltr">${esc(formatPhone(x.phone))}</bdi></div><div class="sub"><span>${esc(x.name || 'بلا بطاقة')}</span>${x.note ? `<span>${esc(x.note)}</span>` : ''}<span>${timeAgo(x.created_at)}</span></div></div>
-        <div class="ops">${(x.removed_from || []).length ? `<button class="btn btn-primary" type="button" data-back="${esc(x.phone)}">${I('history', 'sm')}إعادة الرقم لبطاقته</button><button class="btn btn-soft" type="button" data-unex="${esc(x.phone)}">إعادة السماح فقط</button>` : `<button class="btn btn-soft" type="button" data-unex="${esc(x.phone)}">إعادة السماح</button>`}</div></div>`).join('') : '<div class="empty"><p>لا أرقام مستبعدة.</p></div>'}</div>`;
+        <div class="ops">${isHold(x) ? `<button class="btn btn-danger" type="button" data-okrm="${esc(x.phone)}">${I('check', 'sm')}موافق على الحذف</button>` : ''}${(x.removed_from || []).length ? `<button class="btn btn-primary" type="button" data-back="${esc(x.phone)}">${I('history', 'sm')}إعادة الرقم لبطاقته</button><button class="btn btn-soft" type="button" data-unex="${esc(x.phone)}">إعادة السماح فقط</button>` : `<button class="btn btn-soft" type="button" data-unex="${esc(x.phone)}">إعادة السماح</button>`}</div></div>`).join('') : '<div class="empty"><p>لا أرقام مستبعدة.</p></div>'}</div>`;
   const dl = $('#ex-dl', el);
   if (dl) dl.onclick = () => {
     const q = (v) => { const t = String(v ?? ''); return /[",\n\r]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
@@ -1300,6 +1301,19 @@ function viewExcluded(el) {
     } catch (err) { toast(errMsg(err), true); btn.disabled = false; }
   });
   el.onclick = async (e) => {
+    const okb = e.target.closest('[data-okrm]');
+    if (okb) {
+      const ph = okb.dataset.okrm;
+      okb.disabled = true;
+      try {
+        await rest(`excluded_phones?phone=eq.${encodeURIComponent(ph)}`, { method: 'PATCH', body: { note: 'حذف بموافقتك بعد طلب من صاحب الرقم' } });
+        setExcluded(A.excluded.map((x) => (x.phone === ph ? { ...x, note: 'حذف بموافقتك بعد طلب من صاحب الرقم' } : x)));
+        toast('تمت الموافقة — الرقم محذوف نهائياً ✓');
+        renderNavCounts();
+        viewExcluded(el);
+      } catch (err) { toast(errMsg(err), true); okb.disabled = false; }
+      return;
+    }
     const bk = e.target.closest('[data-back]');
     if (bk) {
       const ph = bk.dataset.back;
