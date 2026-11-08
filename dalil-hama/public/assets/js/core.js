@@ -144,6 +144,31 @@ export const store = {
   },
 };
 
+/** تخزين كبير في IndexedDB (localStorage محدودة بنحو 5 ميغابايت ولا تتّسع لعشرة آلاف نشاط فيُعاد تنزيل كل شيء في كل زيارة) */
+const BIG_DB = 'dh-big';
+function bigOpen() {
+  return new Promise((ok, no) => {
+    if (!window.indexedDB) return no(new Error('no idb'));
+    const q = indexedDB.open(BIG_DB, 1);
+    q.onupgradeneeded = () => q.result.createObjectStore('kv');
+    q.onsuccess = () => ok(q.result);
+    q.onerror = () => no(q.error);
+  });
+}
+async function bigRun(mode, fn) {
+  try {
+    const db = await bigOpen();
+    return await new Promise((ok) => {
+      const tx = db.transaction('kv', mode);
+      const r = fn(tx.objectStore('kv'));
+      tx.oncomplete = () => { db.close(); ok(r && r.result); };
+      tx.onerror = tx.onabort = () => { db.close(); ok(null); };
+    });
+  } catch { return null; }
+}
+export const bigGet = (key) => bigRun('readonly', (st) => st.get(key)).then((v) => v || null);
+export const bigSet = (key, value) => bigRun('readwrite', (st) => st.put(value, key));
+
 /** المسافة بالمتر بين نقطتين */
 export function distance(lat1, lng1, lat2, lng2) {
   const R = 6371000;

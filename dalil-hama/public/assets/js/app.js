@@ -1,6 +1,6 @@
 // دليل حماة — الواجهة العامة
 import {
-  rpc, esc, formatPhone, isMobile, telHref, waHref, fmtNum, debounce, store,
+  rpc, esc, formatPhone, isMobile, telHref, waHref, fmtNum, debounce, store, bigGet, bigSet,
   distance, fmtDistance, mapHref, normalizePhone, safeUrl,
 } from './core.js';
 import { SearchIndex, highlight } from './search.js';
@@ -66,7 +66,12 @@ function strip(data) {
 }
 
 async function loadData() {
-  const cached = store.get(CACHE_KEY);
+  let cached = await bigGet(CACHE_KEY);
+  if (!cached) {
+    // ترحيل مرة واحدة من النسخة القديمة في localStorage (وتحرير مساحتها)
+    cached = store.get(CACHE_KEY);
+    if (cached && cached.items) { await bigSet(CACHE_KEY, cached); store.del(CACHE_KEY); }
+  }
   if (cached && cached.items) applyData(cached);
   try {
     const stale = !cached || !cached.fullAt || Date.now() - cached.fullAt > FULL_SYNC_EVERY;
@@ -82,12 +87,12 @@ async function loadData() {
       next = { ...res, items: [...map.values()].sort((a, b) => a.i - b.i), fullAt: cached.fullAt };
       if (!res.items.length && !res.removed.length && JSON.stringify(res.cats) === JSON.stringify(cached.cats)
         && JSON.stringify(res.settings) === JSON.stringify(cached.settings)) {
-        store.set(CACHE_KEY, { ...strip(cached), now: res.now });
+        bigSet(CACHE_KEY, { ...strip(cached), now: res.now });
         return;
       }
     }
     const clean = strip(next);
-    store.set(CACHE_KEY, clean);
+    bigSet(CACHE_KEY, clean);
     applyData(clean);
   } catch (err) {
     console.warn('sync failed', err);
