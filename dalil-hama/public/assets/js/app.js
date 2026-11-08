@@ -871,19 +871,13 @@ document.addEventListener('click', (e) => {
     return;
   }
   if (actName === 'rmnum' && it) {
+    // لا يتغير شيء في البطاقة من هنا: الإثبات رسالة واتساب تصل المدير من رقم صاحب الرقم نفسه
     e.preventDefault();
     const ph = act.dataset.ph;
-    if (act.disabled) return;
-    act.disabled = true;
-    rpc('request_number_removal', { p_listing: it.i, p_phone: ph }).then((res) => {
-      if (!res || !res.ok) { act.disabled = false; toast(res && res.error === 'rate' ? 'طلبات كثيرة، حاول بعد قليل' : 'تعذّر إرسال الطلب'); return; }
-      const wa = (state.settings.contact || {}).whatsapp;
-      const msg = `الرقم خطأ، يرجى حذف الرقم ${formatPhone(ph)} من بطاقة «${it.n}» (#${it.i})`;
-      const box = $('.sheet-body') || document;
-      const ob = box.querySelector('.owner-box');
-      if (ob) ob.innerHTML = `<p><b>تم إيقاف ظهور الرقم ✓</b><br>سنحذفه نهائياً بعد المراجعة. لتأكيد أنك صاحب الرقم أرسل الرسالة التالية بضغطة واحدة:</p>${wa ? `<a class="btn btn-wa btn-block" href="${waHref(wa, msg)}" target="_blank" rel="noopener">${I('wa', 'sm')}أرسل التأكيد عبر واتساب</a>` : ''}`;
-      const row = act.closest('.phone-row'); if (row) row.remove();
-    }).catch(() => { act.disabled = false; toast('تعذّر الاتصال، حاول مجدداً'); });
+    const wa = (state.settings.contact || {}).whatsapp;
+    const msg = `الرقم خطأ، يرجى حذف الرقم ${formatPhone(ph)} من بطاقة «${it.n}» (#${it.i})`;
+    const ob = act.closest('.owner-box');
+    if (ob) ob.innerHTML = `<p><b>خطوة أخيرة لحذف الرقم 🗑</b><br>اضغطوا الزر لإرسال الرسالة الجاهزة من واتساب هذا الرقم. وصولها من رقمكم يثبت أنكم أصحابه، فنحذفه فوراً.</p>${wa ? `<a class="btn btn-wa btn-block" href="${waHref(wa, msg)}" target="_blank" rel="noopener">${I('wa', 'sm')}أرسل طلب الحذف عبر واتساب</a>` : '<p>تعذّر تحديد رقم التواصل، استعملوا «إبلاغ».</p>'}`;
     return;
   }
   if (actName === 'addphone') { e.preventDefault(); go({ l: null, hash: `addphone-${id}` }, { keep: true, push: !history.state?.sheet }); return; }

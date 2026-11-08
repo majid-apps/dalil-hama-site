@@ -1236,12 +1236,11 @@ async function excludeListing(r, after) {
   } catch (err) { toast(errMsg(err), true); }
 }
 
-const isHold = (x) => String(x.note || '').startsWith('⏳');
 function viewExcluded(el) {
-  const rows = [...A.excluded].sort((a, b) => isHold(b) - isHold(a));
+  const rows = A.excluded;
   el.innerHTML = `<div class="warnbox" style="margin-bottom:12px">${I('info', 'sm')}الأرقام هنا لا تُنشر ولا تُقبل من الزوار أو الاستيراد أبداً، إلا إذا أزلتها من القائمة بنفسك. الاستبعاد يحذف الرقم وحده من بطاقاته، وتبقى البطاقة منشورة ما دام فيها رقم آخر أو موقع أو عنوان.</div>
-    <div class="panel form" id="qd-panel" style="margin-top:0"><h2>${I('trash')}حذف بطاقة بالرقم</h2>
-      <p class="muted" style="margin:0">لمن ردّ عليك «حذف» من واتساب: اكتب رقمه (أو آخر أرقامه) فتظهر بطاقته، ثم احذفها نهائياً ويُستبعد رقمه.</p>
+    <div class="panel form" id="qd-panel" style="margin-top:0"><h2>${I('trash')}حذف رقم بالبحث</h2>
+      <p class="muted" style="margin:0">لمن ردّ عليك «حذف» من واتساب: اكتب رقمه (أو آخر أرقامه) فتظهر بطاقته، ثم احذف الرقم. تبقى البطاقة إن كان فيها أرقام أخرى، وتُحذف إن لم يبقَ فيها رقم.</p>
       <label class="field"><span>رقم المُرسِل</span><input class="input" id="qd-q" dir="ltr" inputmode="tel" placeholder="مثل 0949 018 059" autocomplete="off"></label>
       <div id="qd-res"></div></div>
     <form class="panel form" id="ex-form" style="margin-top:0"><h2>${I('x')}استبعاد رقم</h2>
@@ -1252,7 +1251,7 @@ function viewExcluded(el) {
       ${rows.length ? `<button class="btn btn-soft" type="button" id="ex-dl" style="margin-bottom:10px">${I('download', 'sm')}تحميل الأرقام المستبعدة (CSV)</button>` : ''}
       ${rows.length ? rows.map((x) => `<div class="row"><span class="avatar" style="width:40px;height:40px;font-size:20px;border-radius:12px">⛔</span>
         <div style="min-width:0"><div class="nm"><bdi dir="ltr">${esc(formatPhone(x.phone))}</bdi></div><div class="sub"><span>${esc(x.name || 'بلا بطاقة')}</span>${x.note ? `<span>${esc(x.note)}</span>` : ''}<span>${timeAgo(x.created_at)}</span></div></div>
-        <div class="ops">${isHold(x) ? `<button class="btn btn-danger" type="button" data-okrm="${esc(x.phone)}">${I('check', 'sm')}موافق على الحذف</button>` : ''}${(x.removed_from || []).length ? `<button class="btn btn-primary" type="button" data-back="${esc(x.phone)}">${I('history', 'sm')}إعادة الرقم لبطاقته</button><button class="btn btn-soft" type="button" data-unex="${esc(x.phone)}">إعادة السماح فقط</button>` : `<button class="btn btn-soft" type="button" data-unex="${esc(x.phone)}">إعادة السماح</button>`}</div></div>`).join('') : '<div class="empty"><p>لا أرقام مستبعدة.</p></div>'}</div>`;
+        <div class="ops">${(x.removed_from || []).length ? `<button class="btn btn-primary" type="button" data-back="${esc(x.phone)}">${I('history', 'sm')}إعادة الرقم لبطاقته</button><button class="btn btn-soft" type="button" data-unex="${esc(x.phone)}">إعادة السماح فقط</button>` : `<button class="btn btn-soft" type="button" data-unex="${esc(x.phone)}">إعادة السماح</button>`}</div></div>`).join('') : '<div class="empty"><p>لا أرقام مستبعدة.</p></div>'}</div>`;
   const dl = $('#ex-dl', el);
   if (dl) dl.onclick = () => {
     const q = (v) => { const t = String(v ?? ''); return /[",\n\r]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
@@ -1266,22 +1265,25 @@ function viewExcluded(el) {
     const t = qdTail(qdIn.value);
     const hits = t.length >= 6 ? A.listings.filter((r) => (r.phones || []).some((p) => qdTail(p).endsWith(t) || t.endsWith(qdTail(p)))).slice(0, 8) : [];
     qdOut.innerHTML = t.length < 6 ? '' : hits.length ? hits.map((r) => `<div class="row"><div style="min-width:0"><div class="nm">${esc(r.name)}</div><div class="sub"><span>${(r.phones || []).map((p) => `<bdi dir="ltr">${esc(formatPhone(p))}</bdi>`).join('، ')}</span>${r.status === 'rejected' ? '<span>محذوفة</span>' : ''}</div></div>
-      <div class="ops">${(r.phones || []).filter((p) => qdTail(p).endsWith(t) || t.endsWith(qdTail(p))).map((p) => `<button class="btn btn-danger" type="button" data-qd="${r.id}" data-ph="${esc(p)}">${I('trash', 'sm')}حذف نهائي</button>`).join('')}</div></div>`).join('') : '<p class="muted">لا بطاقة بهذا الرقم. إن لم تكن موجودة فاستبعده من النموذج أدناه كي لا يُنشر.</p>';
+      <div class="ops">${(r.phones || []).filter((p) => qdTail(p).endsWith(t) || t.endsWith(qdTail(p))).map((p) => `<button class="btn btn-danger" type="button" data-qd="${r.id}" data-ph="${esc(p)}">${I('trash', 'sm')}حذف هذا الرقم</button>`).join('')}</div></div>`).join('') : '<p class="muted">لا بطاقة بهذا الرقم. إن لم تكن موجودة فاستبعده من النموذج أدناه كي لا يُنشر.</p>';
   });
   qdOut.addEventListener('click', async (e) => {
     const b = e.target.closest('[data-qd]');
     if (!b) return;
     const r = A.listings.find((x) => x.id === Number(b.dataset.qd));
     const ph = b.dataset.ph;
-    if (!r || !(await confirmBox(`حذف «${esc(r.name)}» نهائياً واستبعاد الرقم <b dir="ltr">${esc(formatPhone(ph))}</b>؟ لن يظهر ثانية (يمكنك التراجع من القائمة أدناه).`, { ok: 'حذف نهائي', danger: true }))) return;
+    const left = r ? (r.phones || []).filter((x) => x !== ph).length : 0;
+    if (!r || !(await confirmBox(`حذف الرقم <b dir="ltr">${esc(formatPhone(ph))}</b> نهائياً من «${esc(r.name)}»؟ ${left ? `تبقى البطاقة (فيها ${fmtNum(left)} رقم آخر).` : 'لا رقم آخر فيها فتُحذف البطاقة.'} يمكنك التراجع من القائمة أدناه.`, { ok: 'حذف الرقم', danger: true }))) return;
     b.disabled = true;
     try {
       const { done } = excludePhones([ph], r.name);
       await done;
-      const [row] = await rest(`listings?id=eq.${r.id}`, { method: 'PATCH', body: { status: 'rejected' }, headers: rep });
-      if (row) upsertLocal(row);
+      if (!left) {
+        const [row] = await rest(`listings?id=eq.${r.id}`, { method: 'PATCH', body: { status: 'rejected' }, headers: rep });
+        if (row) upsertLocal(row);
+      }
       refreshStats();
-      toast('حُذفت البطاقة واستُبعد الرقم ✓');
+      toast(left ? 'حُذف الرقم وبقيت البطاقة ✓' : 'حُذف الرقم والبطاقة ✓');
       renderNavCounts();
       if ($('#ex-form', el)) viewExcluded(el);
     } catch (err) { toast(`لم يكتمل الحذف: ${errMsg(err)}`, true); b.disabled = false; }
@@ -1301,19 +1303,6 @@ function viewExcluded(el) {
     } catch (err) { toast(errMsg(err), true); btn.disabled = false; }
   });
   el.onclick = async (e) => {
-    const okb = e.target.closest('[data-okrm]');
-    if (okb) {
-      const ph = okb.dataset.okrm;
-      okb.disabled = true;
-      try {
-        await rest(`excluded_phones?phone=eq.${encodeURIComponent(ph)}`, { method: 'PATCH', body: { note: 'حذف بموافقتك بعد طلب من صاحب الرقم' } });
-        setExcluded(A.excluded.map((x) => (x.phone === ph ? { ...x, note: 'حذف بموافقتك بعد طلب من صاحب الرقم' } : x)));
-        toast('تمت الموافقة — الرقم محذوف نهائياً ✓');
-        renderNavCounts();
-        viewExcluded(el);
-      } catch (err) { toast(errMsg(err), true); okb.disabled = false; }
-      return;
-    }
     const bk = e.target.closest('[data-back]');
     if (bk) {
       const ph = bk.dataset.back;
