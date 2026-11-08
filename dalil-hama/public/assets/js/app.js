@@ -11,7 +11,12 @@ const $ = (s, r = document) => r.querySelector(s);
 const CACHE_KEY = 'dh:data:v1';
 const FULL_SYNC_EVERY = 12 * 3600 * 1000;
 const PAGE = 36;
-const WA_MSG = 'السلام عليكم، حصلت على رقمكم من «دليل حماة» 🌿';
+/** رسالة واتساب الموحّدة لكل بطاقة (للجميع): الاسم والأرقام والعنوان والموقع ثم رابط البطاقة للتعديل أو الإبلاغ.
+ *  رابط صاحب الرقم الخاص (تعديل/حذف) يُرسل من زر «إشعار صاحب الرقم» في الإدارة وحدها، فلا يُولَّد رمز لأي زائر. */
+const waMsg = (it) => {
+  const map = mapHref(it);
+  return `السلام عليكم ورحمة الله وبركاته 🌿\nحصلنا على رقمكم باسم «${it.n}»\n${it.p && it.p.length ? `أرقامكم: ${it.p.join('، ')}\n` : ''}${it.d ? `عنوانكم: ${it.d}\n` : ''}${map ? `موقعكم: ${map}\n` : ''}من تطبيق «دليل حماة بين يديك»،\nفإن كان هناك أي معلومة خاطئة فيمكنكم:\n✏️ تعديلها\nأو 🗑 حذفها\nأو 🚩 إبلاغنا\n👈 ${location.origin}/?l=${it.i}\nشاكرين لكم تعاونكم وتفهمكم 🌿`;
+};
 
 const QUICK = [
   ['صيدليات', 'صيدليات'], ['عيادات وأطباء', 'أطباء'], ['مستشفيات', 'مشافي'], ['عيادات أسنان', 'أسنان'],
@@ -226,7 +231,7 @@ function card(it, terms = []) {
     <div class="actions">
       ${phone ? `<a class="btn btn-primary call" href="${telHref(phone)}" data-act="call" aria-label="اتصال">${I('phone', 'sm')}اتصال</a>`
     : `<div class="no-phone"><span>بلا رقم</span><button type="button" data-act="addphone">أضف الرقم</button></div>`}
-      ${wa ? `<a class="btn btn-wa wa" href="${waHref(wa, WA_MSG)}" target="_blank" rel="noopener" data-act="whatsapp">${I('wa', 'sm')}واتساب</a>` : ''}
+      ${wa ? `<a class="btn btn-wa wa" href="${waHref(wa, waMsg(it))}" target="_blank" rel="noopener" data-act="whatsapp">${I('wa', 'sm')}واتساب</a>` : ''}
       ${map ? `<a class="btn btn-soft map" href="${esc(map)}" target="_blank" rel="noopener" data-act="map">${I('pin', 'sm')}الموقع</a>` : ''}
       <button class="btn btn-soft share" type="button" data-act="share" aria-label="مشاركة">${I('share', 'sm')}</button>
       ${adminOn() ? `<a class="btn btn-soft" href="/admin/#edit/${it.i}" aria-label="تعديل في الإدارة" title="تعديل في الإدارة">${I('edit', 'sm')}</a>` : ''}
@@ -588,11 +593,11 @@ function openItem(id) {
   const phones = (it.p || []).map((p, i) => `<div class="phone-row">
       <div class="num"><bdi dir="ltr">${esc(formatPhone(p))}</bdi><span class="kind">${isMobile(p) ? 'جوال' : 'أرضي'}${i === 0 ? ' · الرقم الأساسي' : ''}</span></div>
       <button class="icon-btn" type="button" data-act="copy" data-val="${esc(p)}" aria-label="نسخ الرقم">${I('copy', 'sm')}</button>
-      ${isMobile(p) && !it.nw ? `<a class="btn btn-wa" href="${waHref(p, WA_MSG)}" target="_blank" rel="noopener" data-act="whatsapp" aria-label="واتساب">${I('wa', 'sm')}</a>` : ''}
+      ${isMobile(p) && !it.nw ? `<a class="btn btn-wa" href="${waHref(p, waMsg(it))}" target="_blank" rel="noopener" data-act="whatsapp" aria-label="واتساب">${I('wa', 'sm')}</a>` : ''}
       <a class="btn btn-primary" href="${telHref(p)}" data-act="call">${I('phone', 'sm')}اتصال</a>
     </div>`).join('');
   const waExtra = wa && !(it.p || []).includes(wa)
-    ? `<div class="phone-row"><div class="num"><bdi dir="ltr">${esc(formatPhone(wa))}</bdi><span class="kind">واتساب</span></div><a class="btn btn-wa" href="${waHref(wa, WA_MSG)}" target="_blank" rel="noopener" data-act="whatsapp">${I('wa', 'sm')}مراسلة</a></div>` : '';
+    ? `<div class="phone-row"><div class="num"><bdi dir="ltr">${esc(formatPhone(wa))}</bdi><span class="kind">واتساب</span></div><a class="btn btn-wa" href="${waHref(wa, waMsg(it))}" target="_blank" rel="noopener" data-act="whatsapp">${I('wa', 'sm')}مراسلة</a></div>` : '';
   const body = `<div data-id="${it.i}">
     <div class="detail-hero" style="--hue:${catHue(cat)}">
       <div class="avatar" aria-hidden="true">${cat ? cat.ic : '📍'}</div>
