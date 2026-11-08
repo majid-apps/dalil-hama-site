@@ -830,6 +830,12 @@ function registerOwnerLink(id, phone, token) {
 
 const SENT = '📨';
 const isSent = (r) => (r.admin_note || '').includes(SENT);
+// «قائمة البحث»: مرشحون بلا رقم أو عنوان واضح يُخفَون مؤقتاً (hidden + وسم) للبحث عن بياناتهم لاحقاً، ويمكن إعادتهم للمراجعة
+const LATER_TAG = 'قائمة-بحث';
+const LATER_NOTE = '🔎 قائمة البحث: ينقصه رقم أو عنوان أو موقع';
+const isLater = (r) => r.status === 'hidden' && (r.tags || []).includes(LATER_TAG);
+const laterPatch = (r) => ({ status: 'hidden', tags: [...new Set([...(r.tags || []), LATER_TAG])], admin_note: ((r.admin_note || '').includes('🔎 قائمة البحث') ? r.admin_note : `${r.admin_note ? `${r.admin_note}\n` : ''}${LATER_NOTE}`) });
+const unlaterPatch = (r) => ({ status: 'pending', tags: (r.tags || []).filter((t) => t !== LATER_TAG), admin_note: (r.admin_note || '').split('\n').filter((l) => !l.includes('🔎 قائمة البحث')).join('\n').trim() || null });
 const PEND_PAGE = 40;
 
 /** ضمّ أرقام مرشح إلى بطاقة منشورة (يكمل الناقص فيها) ثم حذف المرشح. بلا targetId: نافذة بحث لاختيار البطاقة */
@@ -960,6 +966,7 @@ function drawCandBulk(box, { curRows, redraw, el }) {
       ${n ? `<button class="btn btn-wa" data-b="msg">${I('wa', 'sm')}مراسلة المحدّدين</button>
       <button class="btn btn-primary" data-b="ok">${I('check', 'sm')}وافق — انشر المحدّدين</button>
       <button class="btn btn-soft" data-b="merge">${I('merge', 'sm')}ضمّ المحدّدين</button>
+      <button class="btn btn-soft" data-b="later">${I('search', 'sm')}للبحث لاحقاً</button>
       <button class="btn btn-ghost" data-b="clear" style="color:inherit">إلغاء التحديد</button>` : ''}</div>`;
     el.querySelectorAll('[data-csel]').forEach((cb) => { cb.checked = A.candSel.has(Number(cb.dataset.csel)); });
   };
@@ -1003,6 +1010,11 @@ function drawCandBulk(box, { curRows, redraw, el }) {
         const n = await approveMany(rows.map((r) => r.id));
         A.candSel.clear();
         toast(`تم نشر ${fmtNum(n)} ✓ (${((performance.now() - t0) / 1000).toFixed(1)} ث)`);
+      } else if (act === 'later') {
+        if (!(await confirmBox(`نقل ${fmtNum(rows.length)} مرشحاً إلى «قائمة البحث» (يُخفون إلى أن تجد بياناتهم، ويمكن إعادتهم)؟`, { ok: 'انقل' }))) return;
+        b.disabled = true;
+        for (const r of rows) { const [row] = await rest(`listings?id=eq.${r.id}`, { method: 'PATCH', body: laterPatch(r), headers: rep }); upsertLocal(row); A.candSel.delete(r.id); }
+        toast(`نُقل ${fmtNum(rows.length)} إلى قائمة البحث ✓`);
       } else if (act === 'merge') {
         if (!(await confirmBox(`ضمّ ${fmtNum(rows.length)} مرشحاً كلٌّ إلى البطاقة المنشورة المذكورة في ملاحظته (#رقم)، ثم حذفهم؟ من لا بطاقة له يُترك.`, { ok: 'ضمّ الكل' }))) return;
         b.disabled = true;
@@ -1020,14 +1032,15 @@ function drawCandBulk(box, { curRows, redraw, el }) {
 function viewPending(el, mode = 'req') {
   const cand = mode === 'cand';
   const all = A.listings.filter((r) => r.status === 'pending' && cand === isCand(r)).sort((a, b) => b.id - a.id);
-  if (!all.length) {
+  const later = cand ? A.listings.filter(isLater).sort((a, b) => b.id - a.id) : [];
+  if (!all.length && !later.length) {
     el.innerHTML = cand
       ? `<div class="empty"><div class="big">📋</div><h3>لا يوجد مرشحون</h3><p>الأرقام التي تستوردها «كمرشحين» تظهر هنا للتواصل مع أصحابها قبل النشر. استخدمها من «استيراد وتصدير».</p></div>`
       : `<div class="empty"><div class="big">🎉</div><h3>لا توجد طلبات معلّقة</h3><p>كل طلبات الإضافة تمت مراجعتها.</p></div>`;
     return;
   }
-  const n = { todo: all.filter((r) => !isSent(r)).length, sent: all.filter(isSent).length, all: all.length };
-  el.innerHTML = `${cand ? `<div class="toolbar"><div class="seg-tabs">${[['todo', 'لم يُراسَل'], ['sent', 'بانتظار الرد'], ['all', 'الكل'], ['sel', 'المحدّدون']]
+  const n = { todo: all.filter((r) => !isSent(r)).length, sent: all.filter(isSent).length, all: all.length, later: later.length };
+  el.innerHTML = `${cand ? `<div class="toolbar"><div class="seg-tabs">${[['todo', 'لم يُراسَل'], ['sent', 'بانتظار الرد'], ['all', 'الكل'], ['later', 'قائمة البحث'], ['sel', 'المحدّدون']]
     .map(([k, l]) => `<button type="button" data-ctab="${k}" aria-pressed="${A.candTab === k}">${l} (${fmtNum(k === 'sel' ? A.candSel.size : n[k])})</button>`).join('')}</div>
     <input class="input grow" id="cand-q" type="search" placeholder="ابحث بالاسم أو جزء من الرقم…" value="${esc(A.candQ)}"></div><div id="cand-bulk"></div>` : ''}<div id="pend-list"></div>`;
   if (cand) for (const id of [...A.candSel]) { const r = A.byId.get(id); if (!r || r.status !== 'pending') A.candSel.delete(id); }
@@ -1035,11 +1048,11 @@ function viewPending(el, mode = 'req') {
   const byPhone = new Map();
   for (const x of A.listings) if (x.status === 'approved') for (const p of x.phones || []) { if (!byPhone.has(p)) byPhone.set(p, []); byPhone.get(p).push(x); }
   const curRows = () => {
-    let rows = all;
+    let rows = cand && A.candTab === 'later' ? later : all;
     if (cand) {
       const q = normalize(A.candQ);
       const qd = A.candQ.replace(/\D/g, '');
-      const inTab = (r) => (A.candTab === 'all' ? true : A.candTab === 'sel' ? A.candSel.has(r.id) : (A.candTab === 'sent') === isSent(r));
+      const inTab = (r) => (A.candTab === 'later' ? true : A.candTab === 'all' ? true : A.candTab === 'sel' ? A.candSel.has(r.id) : (A.candTab === 'sent') === isSent(r));
       rows = rows.filter((r) => inTab(r) && (!q || normalize(r.name).includes(q) || (qd.length >= 3 && (r.phones || []).some((p) => p.includes(qd)))));
     }
     return rows;
@@ -1056,7 +1069,7 @@ function viewPending(el, mode = 'req') {
         .map((id) => A.byId.get(id)).filter((x) => x && x.status === 'approved' && x.id !== r.id).slice(0, 2) : [];
       return `<div class="req" data-id="${r.id}">
       <div class="req-head">${cand ? `<input type="checkbox" data-csel="${r.id}" aria-label="تحديد"${A.candSel.has(r.id) ? ' checked' : ''} style="width:22px;height:22px;flex:none">` : ''}<span class="avatar" style="--hue:${catHue(r.category_id)}">${catIcon(r.category_id)}</span>
-        <div style="flex:1;min-width:0"><h3>${esc(r.name)}</h3><div class="muted" style="font-size:13px">${esc(catName(r.category_id))} · ${timeAgo(r.created_at)} · #${r.id}</div></div>${cand && isSent(r) ? '<span class="st hidden">بانتظار الرد</span>' : st(r.status)}</div>
+        <div style="flex:1;min-width:0"><h3>${esc(r.name)}</h3><div class="muted" style="font-size:13px">${esc(catName(r.category_id))} · ${timeAgo(r.created_at)} · #${r.id}</div></div>${isLater(r) ? '<span class="st hidden">قائمة البحث</span>' : cand && isSent(r) ? '<span class="st hidden">بانتظار الرد</span>' : st(r.status)}</div>
       <dl class="kv">
         <dt>الأرقام</dt><dd>${phonesHtml(r)}</dd>
         ${r.area || r.address ? `<dt>العنوان</dt><dd>${esc([r.area, r.address].filter(Boolean).join('، '))}</dd>` : ''}
@@ -1067,7 +1080,11 @@ function viewPending(el, mode = 'req') {
         ${r.admin_note ? `<dt>ملاحظات</dt><dd style="white-space:pre-wrap">${esc(r.admin_note)}</dd>` : ''}
       </dl>
       ${dupIds.length ? `<div class="warnbox">${I('alert', 'sm')}الرقم موجود مسبقاً في: ${dupIds.map((d) => `<a href="#" data-edit="${d.id}" style="font-weight:700">${esc(d.name)}</a>`).join('، ')}</div>` : ''}
-      <div class="ops">
+      ${isLater(r) ? `<div class="ops">
+        <button class="btn btn-primary" data-unlater="${r.id}">${I('check', 'sm')}إعادة للمراجعة</button>
+        <button class="btn btn-soft" data-edit="${r.id}">${I('edit', 'sm')}تعديل (أضف الرقم أو العنوان)</button>
+        <button class="btn btn-danger" data-reject="${r.id}">${I('x', 'sm')}استبعاد</button>
+      </div></div>` : `<div class="ops">
         <button class="btn btn-primary" data-approve="${r.id}">${I('check', 'sm')}${cand ? 'وافق — انشر' : 'قبول ونشر'}</button>
         ${mob ? `<a class="btn btn-wa" href="${waHref(mob, cand ? CONSENT_MSG(r.name, ownerLink(tok)) : `مرحباً، وصلنا طلب إضافة «${r.name}» إلى دليل حماة. نود التأكد من صحة البيانات قبل النشر 🌿`)}" target="_blank" rel="noopener"${cand && !isSent(r) ? ` data-wa-sent="${r.id}"` : ''}${cand ? ` data-owner="${r.id}" data-ph="${esc(mob)}" data-tok="${tok}"` : ''}>${I('wa', 'sm')}${cand ? 'رسالة الموافقة' : 'تحقق عبر واتساب'}</a>` : ''}
         ${r.phones && r.phones[0] ? `<a class="btn btn-soft" href="${telHref(r.phones[0])}">${I('phone', 'sm')}اتصال</a>` : ''}
@@ -1075,9 +1092,10 @@ function viewPending(el, mode = 'req') {
         ${cand && !isSent(r) && !mob ? `<button class="btn btn-soft" data-sent="${r.id}">${SENT} تواصلتُ معه</button>` : ''}
         ${targets.map((x) => `<button class="btn btn-soft" data-attach="${r.id}" data-to="${x.id}">${I('merge', 'sm')}ضمّ إلى «${esc(x.name.slice(0, 28))}»</button>`).join('')}
         ${cand && !targets.length ? `<button class="btn btn-soft" data-attach="${r.id}">${I('merge', 'sm')}ضمّ لبطاقة موجودة</button>` : ''}
+        ${cand ? `<button class="btn btn-soft" data-later="${r.id}">${I('search', 'sm')}للبحث لاحقاً</button>` : ''}
         <button class="btn btn-soft" data-edit="${r.id}">${I('edit', 'sm')}تعديل</button>
         <button class="btn btn-danger" data-reject="${r.id}">${I('x', 'sm')}${cand ? 'استبعاد' : 'رفض'}</button>
-      </div></div>`;
+      </div></div>`}`;
     }).join('') || '<div class="empty"><p>لا شيء هنا.</p></div>')
       + (rows.length > lim ? `<button class="btn btn-soft btn-block mt" type="button" data-more>عرض المزيد (${fmtNum(rows.length - lim)} متبقٍ)</button>` : '');
   };
@@ -1111,6 +1129,20 @@ function viewPending(el, mode = 'req') {
       rest(`listings?id=eq.${r0.id}`, { method: 'PATCH', body: { admin_note: note }, headers: rep, keepalive: true })
         .then(([row]) => { upsertLocal(row); toast('سُجّلت «أُرسلت» ✓ — التراجع من «بانتظار الرد»'); again(); })
         .catch((err) => toast(errMsg(err), true));
+      return;
+    }
+    const lt = e.target.closest('[data-later],[data-unlater]');
+    if (lt) {
+      const r1 = A.byId.get(Number(lt.dataset.later || lt.dataset.unlater));
+      if (!r1) return;
+      const back = !!lt.dataset.unlater;
+      const body = back ? unlaterPatch(r1) : laterPatch(r1);
+      upsertLocal({ ...r1, ...body });
+      toast(back ? 'أُعيد إلى «لم يُراسَل» ✓' : 'نُقل إلى قائمة البحث ✓');
+      again();
+      rest(`listings?id=eq.${r1.id}`, { method: 'PATCH', body, headers: rep })
+        .then(([row]) => upsertLocal(row))
+        .catch((err) => { upsertLocal(r1); toast(`لم يُحفظ: ${errMsg(err)}`, true); again(); });
       return;
     }
     const ms = e.target.closest('[data-sent]');
@@ -1274,7 +1306,7 @@ function hashParam(k) { return new URLSearchParams(location.hash.split('?')[1] |
 
 function viewCands(el) {
   A.candQ = ''; // كل فتح جديد للشاشة يبدأ دون بحث سابق
-  if (['todo', 'sent', 'all'].includes(hashParam('tab'))) A.candTab = hashParam('tab');
+  if (['todo', 'sent', 'all', 'later'].includes(hashParam('tab'))) A.candTab = hashParam('tab');
   el.innerHTML = `<div class="warnbox" style="margin-bottom:12px">${I('info', 'sm')}المرشحون أرقام للمراجعة فقط، لا تظهر في الدليل. أرسل رسالة الموافقة ثم اضغط «أرسلتُ الرسالة» لينتقل إلى «بانتظار الرد». وحين يرد صاحب الرقم ابحث عنه بجزء من رقمه، واضغط «وافق — انشر».</div><div id="cand-box"></div>`;
   viewPending($('#cand-box'), 'cand');
 }
