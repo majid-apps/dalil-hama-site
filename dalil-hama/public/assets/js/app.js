@@ -580,6 +580,87 @@ document.addEventListener('keydown', (e) => {
 });
 
 // تفاصيل النشاط
+/** شاشة صاحب النشاط القادم من رسالة واتساب (?l=ID&fix=1): الرقم خطأ (حذف فوري ومنع الإعادة)، تعديل (الاسم والرقم والعنوان والموقع)، إبلاغ برسالة.
+ *  التعديل والإبلاغ يصلان المدير بلاغاً ليراجعهما؛ الحذف فقط مباشر (يُحفظ في «الأرقام المستبعدة» ويمكن التراجع منها). */
+function openFix(it, cat) {
+  const hero = `<div class="detail-hero" style="--hue:${catHue(cat)}"><div class="avatar" aria-hidden="true">${cat ? cat.ic : '📍'}</div>
+      <div style="min-width:0"><h3>${esc(it.n)}</h3>${cat ? `<div class="tags"><span class="tag brand">${esc(cat.n)}</span></div>` : ''}</div></div>`;
+  const home = () => `${hero}
+    <div class="block"><p class="block-title">بيانات بطاقتكم في الدليل</p>
+      ${(it.p || []).map((x) => `<div class="info-row">${I('phone')}<div class="grow"><bdi dir="ltr">${esc(x)}</bdi></div></div>`).join('') || '<div class="info-row"><div class="grow">لا يوجد رقم</div></div>'}
+      ${it.d || it.a ? `<div class="info-row">${I('pin')}<div class="grow">${esc(it.d || `حماة، ${it.a}`)}</div></div>` : ''}</div>
+    <p style="color:var(--ink-2);margin:4px 0 12px">إن كان فيها أي معلومة خاطئة فاختاروا ما يناسب:</p>
+    <div class="detail-actions" style="grid-template-columns:1fr">
+      <button class="qa" type="button" data-fx="wrong">${I('x')}الرقم خطأ — حذف</button>
+      <button class="qa" type="button" data-fx="edit">${I('edit')}تعديل</button>
+      <button class="qa" type="button" data-fx="report">${I('flag')}إبلاغ</button>
+    </div>`;
+  const back = `<button class="btn btn-soft" type="button" data-fx="home">رجوع</button>`;
+  const views = {
+    home,
+    wrong: () => `<p style="margin:0 0 12px;color:var(--ink-2)">اختاروا الرقم الخاطئ ليُحذف من الدليل ولا يُضاف مرة أخرى:</p>
+      ${(it.p || []).map((x) => `<button class="btn o-del btn-block" type="button" data-fx="del" data-ph="${esc(x)}" style="margin-bottom:8px;justify-content:center"><bdi dir="ltr">${esc(x)}</bdi> — احذفوه</button>`).join('') || '<p>لا يوجد رقم في البطاقة.</p>'}
+      <div class="row">${back}</div>`,
+    edit: () => `<form class="form" data-fx-form="edit" novalidate>
+      <p style="margin:0;color:var(--ink-2)">اكتبوا البيانات الصحيحة وسنراجعها ونحدّث بطاقتكم.</p>
+      <label class="field"><span>الاسم</span><input class="input" name="name" maxlength="160" value="${esc(it.n)}"></label>
+      <label class="field"><span>الرقم</span><input class="input" name="phone" type="tel" dir="ltr" inputmode="tel" maxlength="40" value="${esc((it.p || []).join(' / '))}"></label>
+      <label class="field"><span>العنوان</span><input class="input" name="address" maxlength="300" value="${esc(it.d || '')}" placeholder="الحي، الشارع، بجانب…"></label>
+      <label class="field"><span>الموقع <em>(رابط الخريطة)</em></span><input class="input" name="map" dir="ltr" maxlength="600" value="${esc(mapHref(it) || '')}" placeholder="رابط خرائط Google"></label>
+      <div class="form-error" hidden></div>
+      <button class="btn btn-primary btn-lg btn-block" type="submit">إرسال التعديل</button><div class="row">${back}</div></form>`,
+    report: () => `<form class="form" data-fx-form="report" novalidate>
+      <p style="margin:0;color:var(--ink-2)">اكتبوا الأخطاء التي في بطاقتكم لنصلحها.</p>
+      <label class="field"><span>الأخطاء</span><textarea class="input" name="details" rows="5" maxlength="900" required placeholder="مثال: العنوان تغيّر إلى… / الرقم الثاني غير صحيح…"></textarea></label>
+      <div class="form-error" hidden></div>
+      <button class="btn btn-primary btn-lg btn-block" type="submit">إرسال</button><div class="row">${back}</div></form>`,
+  };
+  const sh = showSheet(`item:${it.i}`, 'بطاقتكم في الدليل', `<div data-id="${it.i}" id="fx-box">${home()}</div>`, { label: it.n });
+  const box = () => sh.querySelector('#fx-box');
+  const show = (v) => { box().innerHTML = views[v](); };
+  const done = (emoji, title, text) => { box().innerHTML = `<div class="o-state" style="text-align:center;padding:12px 0"><div style="font-size:46px">${emoji}</div><h3>${title}</h3><p style="color:var(--ink-2)">${text}</p><div class="row" style="justify-content:center">${back}</div></div>`; };
+  sh.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-fx]');
+    if (!b) return;
+    e.preventDefault();
+    const v = b.dataset.fx;
+    if (v === 'del') {
+      b.disabled = true;
+      try {
+        const r = await rpc('fix_delete', { p_listing: it.i, p_phone: b.dataset.ph });
+        if (!r || !r.ok) { b.disabled = false; toast(r && r.error === 'rate' ? 'محاولات كثيرة اليوم، حاولوا لاحقاً.' : 'تعذّر الحذف، ربما حُذف الرقم من قبل.'); return; }
+        it.p = (it.p || []).filter((x) => x !== b.dataset.ph);
+        done('✅', 'حُذف الرقم', 'لن يُضاف هذا الرقم إلى الدليل مرة أخرى. شكراً لكم 🌿');
+      } catch { b.disabled = false; toast('تعذّر الاتصال، حاولوا مجدداً.'); }
+      return;
+    }
+    if (views[v]) show(v);
+  });
+  sh.addEventListener('submit', async (e) => {
+    const f = e.target.closest('[data-fx-form]');
+    if (!f) return;
+    e.preventDefault();
+    const fd = Object.fromEntries(new FormData(f));
+    const btn = f.querySelector('[type=submit]');
+    const err = f.querySelector('.form-error');
+    let details;
+    if (f.dataset.fxForm === 'edit') {
+      details = `طلب تعديل من صاحب النشاط:\nالاسم: ${fd.name}\nالرقم: ${fd.phone}\nالعنوان: ${fd.address}\nالموقع: ${fd.map}\n(القديم: ${it.n} | ${(it.p || []).join(' / ')} | ${it.d || '-'})`;
+    } else {
+      details = String(fd.details || '').trim();
+      if (details.length < 5) { err.textContent = 'اكتبوا الأخطاء بوضوح (5 أحرف على الأقل).'; err.hidden = false; return; }
+      details = `بلاغ من صاحب النشاط:\n${details}`;
+    }
+    btn.disabled = true;
+    try {
+      const r = await rpc('submit_report', { payload: { listing_id: it.i, kind: 'wrong_info', details: details.slice(0, 1000), contact: '' } });
+      if (!r || !r.ok) { btn.disabled = false; err.textContent = r && r.error === 'rate' ? 'محاولات كثيرة، حاولوا لاحقاً.' : 'تعذّر الإرسال، حاولوا مجدداً.'; err.hidden = false; return; }
+      done('📨', 'وصلتنا رسالتكم', 'سنراجعها ونحدّث بطاقتكم. شكراً لكم 🌿');
+    } catch { btn.disabled = false; err.textContent = 'تعذّر الاتصال، حاولوا مجدداً.'; err.hidden = false; }
+  });
+  document.title = `${it.n} — دليل حماة`;
+}
+
 function openItem(id, fix = false) {
   const it = state.byId.get(id);
   if (!it) {
@@ -598,25 +679,7 @@ function openItem(id, fix = false) {
     </div>`).join('');
   const waExtra = wa && !(it.p || []).includes(wa)
     ? `<div class="phone-row"><div class="num"><bdi dir="ltr">${esc(formatPhone(wa))}</bdi><span class="kind">واتساب</span></div><a class="btn btn-wa" href="${waHref(wa, waMsg(it))}" target="_blank" rel="noopener" data-act="whatsapp">${I('wa', 'sm')}مراسلة</a></div>` : '';
-  if (fix) {
-    // عرض صاحب النشاط القادم من رسالة واتساب: بيانات البطاقة للتحقق فقط، وثلاثة خيارات: الرقم خطأ، يحتاج تعديل، إبلاغ
-    const fixBody = `<div data-id="${it.i}">
-      <div class="detail-hero" style="--hue:${catHue(cat)}"><div class="avatar" aria-hidden="true">${cat ? cat.ic : '📍'}</div>
-        <div style="min-width:0"><h3>${esc(it.n)}</h3>${cat ? `<div class="tags"><span class="tag brand">${esc(cat.n)}</span></div>` : ''}</div></div>
-      <div class="block"><p class="block-title">بيانات بطاقتكم في الدليل</p>
-        ${(it.p || []).map((x) => `<div class="info-row">${I('phone')}<div class="grow"><bdi dir="ltr">${esc(x)}</bdi></div></div>`).join('') || '<div class="info-row"><div class="grow">لا يوجد رقم</div></div>'}
-        ${it.d || it.a ? `<div class="info-row">${I('pin')}<div class="grow">${esc(it.d || `حماة، ${it.a}`)}</div></div>` : ''}
-      </div>
-      <p style="color:var(--ink-2);margin:4px 0 12px">إن كان فيها أي معلومة خاطئة فاختاروا ما يناسب:</p>
-      <div class="detail-actions" style="grid-template-columns:1fr">
-        <button class="qa" type="button" data-act="report" data-kind="wrong_number">${I('x')}الرقم خطأ</button>
-        <button class="qa" type="button" data-act="report" data-kind="wrong_info">${I('edit')}يحتاج تعديل</button>
-        <button class="qa" type="button" data-act="report" data-kind="other">${I('flag')}إبلاغ</button>
-      </div></div>`;
-    showSheet(`item:${id}`, 'بطاقتكم في الدليل', fixBody, { label: it.n });
-    document.title = `${it.n} — دليل حماة`;
-    return;
-  }
+  if (fix) { openFix(it, cat); return; }
   const body = `<div data-id="${it.i}">
     <div class="detail-hero" style="--hue:${catHue(cat)}">
       <div class="avatar" aria-hidden="true">${cat ? cat.ic : '📍'}</div>
