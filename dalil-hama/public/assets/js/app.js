@@ -217,13 +217,14 @@ function card(it, terms = []) {
         <div class="card-info">
           <h3 class="card-name">${highlight(it.n, terms)}${it.v ? `<span class="badge" title="موثّق">${I('verified')}</span>` : ''}</h3>
           <div class="meta">${cat ? `<span>${esc(cat.n)}</span>` : ''}${it.a ? `<span>${esc(it.a)}</span>` : ''}${d !== null ? `<span class="dist">${fmtDistance(d)}</span>` : ''}</div>
+          ${it.p && it.p.length ? `<div class="phones">${it.p.slice(0, 2).map((x) => `<bdi dir="ltr">${esc(formatPhone(x))}</bdi>`).join('<i aria-hidden="true">·</i>')}</div>` : ''}
           ${it.d ? `<div class="addr">${esc(it.d)}</div>` : ''}
         </div>
       </a>
       <button class="fav" type="button" data-act="fav" aria-pressed="${state.favs.has(it.i)}" aria-label="المفضلة">${I('heart')}</button>
     </div>
     <div class="actions">
-      ${phone ? `<a class="btn btn-primary call" href="${telHref(phone)}" data-act="call" aria-label="اتصال">${I('phone', 'sm')}<bdi dir="ltr" class="call-num">${esc(formatPhone(phone))}</bdi></a>`
+      ${phone ? `<a class="btn btn-primary call" href="${telHref(phone)}" data-act="call" aria-label="اتصال">${I('phone', 'sm')}اتصال</a>`
     : `<div class="no-phone"><span>بلا رقم</span><button type="button" data-act="addphone">أضف الرقم</button></div>`}
       ${wa ? `<a class="btn btn-wa wa" href="${waHref(wa, WA_MSG)}" target="_blank" rel="noopener" data-act="whatsapp">${I('wa', 'sm')}واتساب</a>` : ''}
       ${map ? `<a class="btn btn-soft map" href="${esc(map)}" target="_blank" rel="noopener" data-act="map">${I('pin', 'sm')}الموقع</a>` : ''}
