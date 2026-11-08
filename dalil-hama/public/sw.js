@@ -1,5 +1,5 @@
 // عامل الخدمة: يجعل الدليل يعمل بسرعة وحتى دون إنترنت بعد أول زيارة.
-const VERSION = 'dh-v28';
+const VERSION = 'dh-v29';
 const SHELL = [
   '/',
   '/assets/css/app.css?v=6',
@@ -8,7 +8,7 @@ const SHELL = [
   // لوحة الإدارة تُحفظ على الجوال لتفتح فوراً (التحديث في الخلفية)؛ اجعل أرقام ?v= هنا مطابقة لـ admin/index.html
   '/admin/',
   '/assets/css/admin.css?v=7',
-  '/assets/js/admin.js?v=25',
+  '/assets/js/admin.js?v=26',
   '/assets/js/core.js',
   '/assets/js/search.js',
   '/assets/js/config.js',

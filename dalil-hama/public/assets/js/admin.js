@@ -1239,6 +1239,10 @@ async function excludeListing(r, after) {
 function viewExcluded(el) {
   const rows = A.excluded;
   el.innerHTML = `<div class="warnbox" style="margin-bottom:12px">${I('info', 'sm')}الأرقام هنا لا تُنشر ولا تُقبل من الزوار أو الاستيراد أبداً، إلا إذا أزلتها من القائمة بنفسك. الاستبعاد يحذف الرقم وحده من بطاقاته، وتبقى البطاقة منشورة ما دام فيها رقم آخر أو موقع أو عنوان.</div>
+    <div class="panel form" id="qd-panel" style="margin-top:0"><h2>${I('trash')}حذف بطاقة بالرقم</h2>
+      <p class="muted" style="margin:0">لمن ردّ عليك «حذف» من واتساب: اكتب رقمه (أو آخر أرقامه) فتظهر بطاقته، ثم احذفها نهائياً ويُستبعد رقمه.</p>
+      <label class="field"><span>رقم المُرسِل</span><input class="input" id="qd-q" dir="ltr" inputmode="tel" placeholder="مثل 0949 018 059" autocomplete="off"></label>
+      <div id="qd-res"></div></div>
     <form class="panel form" id="ex-form" style="margin-top:0"><h2>${I('x')}استبعاد رقم</h2>
       <label class="field"><span>الرقم <em>(أي صيغة، مثل +963 960 912 185)</em></span><textarea class="input" name="phones" dir="ltr" rows="2" placeholder="يمكن كتابة أكثر من رقم، كل رقم في سطر" required></textarea></label>
       <label class="field"><span>ملاحظة <em>(اختياري)</em></span><input class="input" name="note" maxlength="300"></label>
@@ -1254,6 +1258,33 @@ function viewExcluded(el) {
     const csv = '\ufeff' + ['الرقم,اسم البطاقة,ملاحظة,تاريخ الاستبعاد', ...A.excluded.map((x) => [x.phone, x.name, x.note, (x.created_at || '').slice(0, 10)].map(q).join(','))].join('\r\n');
     download(`excluded-numbers-${new Date().toISOString().slice(0, 10)}.csv`, csv, 'text/csv;charset=utf-8');
   };
+  // حذف بطاقة بالرقم: بحث بآخر الأرقام ثم «حذف نهائي» يستبعد الرقم ويرفض البطاقة (كما لو حذفها صاحبها)
+  const qdIn = $('#qd-q', el), qdOut = $('#qd-res', el);
+  const qdTail = (v) => String(v || '').replace(/\D/g, '').slice(-9);
+  qdIn.addEventListener('input', () => {
+    const t = qdTail(qdIn.value);
+    const hits = t.length >= 6 ? A.listings.filter((r) => (r.phones || []).some((p) => qdTail(p).endsWith(t) || t.endsWith(qdTail(p)))).slice(0, 8) : [];
+    qdOut.innerHTML = t.length < 6 ? '' : hits.length ? hits.map((r) => `<div class="row"><div style="min-width:0"><div class="nm">${esc(r.name)}</div><div class="sub"><span>${(r.phones || []).map((p) => `<bdi dir="ltr">${esc(formatPhone(p))}</bdi>`).join('، ')}</span>${r.status === 'rejected' ? '<span>محذوفة</span>' : ''}</div></div>
+      <div class="ops">${(r.phones || []).filter((p) => qdTail(p).endsWith(t) || t.endsWith(qdTail(p))).map((p) => `<button class="btn btn-danger" type="button" data-qd="${r.id}" data-ph="${esc(p)}">${I('trash', 'sm')}حذف نهائي</button>`).join('')}</div></div>`).join('') : '<p class="muted">لا بطاقة بهذا الرقم. إن لم تكن موجودة فاستبعده من النموذج أدناه كي لا يُنشر.</p>';
+  });
+  qdOut.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-qd]');
+    if (!b) return;
+    const r = A.listings.find((x) => x.id === Number(b.dataset.qd));
+    const ph = b.dataset.ph;
+    if (!r || !(await confirmBox(`حذف «${esc(r.name)}» نهائياً واستبعاد الرقم <b dir="ltr">${esc(formatPhone(ph))}</b>؟ لن يظهر ثانية (يمكنك التراجع من القائمة أدناه).`, { ok: 'حذف نهائي', danger: true }))) return;
+    b.disabled = true;
+    try {
+      const { done } = excludePhones([ph], r.name);
+      await done;
+      const [row] = await rest(`listings?id=eq.${r.id}`, { method: 'PATCH', body: { status: 'rejected' }, headers: rep });
+      if (row) upsertLocal(row);
+      refreshStats();
+      toast('حُذفت البطاقة واستُبعد الرقم ✓');
+      renderNavCounts();
+      if ($('#ex-form', el)) viewExcluded(el);
+    } catch (err) { toast(`لم يكتمل الحذف: ${errMsg(err)}`, true); b.disabled = false; }
+  });
   $('#ex-form', el).addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
