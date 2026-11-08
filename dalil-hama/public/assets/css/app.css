@@ -299,6 +299,8 @@ select.pill { appearance: none; -webkit-appearance: none; padding-inline-end: 34
 .actions .btn { min-height: 42px; padding: 0 12px; font-size: 14.5px; border-radius: 12px; }
 .actions .call { flex: 1.4; }
 .call-num { font-weight: 700; white-space: nowrap; }
+.card .phones { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-top: 4px; font-weight: 700; font-size: .95rem; color: var(--brand); letter-spacing: .2px; }
+.card .phones i { font-style: normal; opacity: .5; }
 .actions .wa, .actions .map { flex: 1; }
 .actions .share { width: 42px; padding: 0; flex: none; }
 /* البطاقات الضيقة (هواتف أقل من ~372px): واتساب والموقع أيقونات فقط، والنص يبقى للقارئ الصوتي */
