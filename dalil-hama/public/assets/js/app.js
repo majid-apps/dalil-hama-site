@@ -580,8 +580,8 @@ document.addEventListener('keydown', (e) => {
 });
 
 // تفاصيل النشاط
-/** شاشة صاحب النشاط القادم من رسالة واتساب (?l=ID&fix=1): الرقم خطأ (حذف فوري ومنع الإعادة)، تعديل (الاسم والرقم والعنوان والموقع)، إبلاغ برسالة.
- *  التعديل والإبلاغ يصلان المدير بلاغاً ليراجعهما؛ الحذف فقط مباشر (يُحفظ في «الأرقام المستبعدة» ويمكن التراجع منها). */
+/** شاشة صاحب النشاط القادم من رسالة واتساب عامة (?l=ID&fix=1): الرقم خطأ، تعديل (الاسم والرقم والعنوان والموقع)، إبلاغ برسالة.
+ *  كلها تصل المدير بلاغاً ليراجعه. الحذف الفعلي لصاحب الرقم وحده عبر رابطه السري /r/#رمز (زر «إشعار صاحب الرقم» في الإدارة). */
 function openFix(it, cat) {
   const hero = `<div class="detail-hero" style="--hue:${catHue(cat)}"><div class="avatar" aria-hidden="true">${cat ? cat.ic : '📍'}</div>
       <div style="min-width:0"><h3>${esc(it.n)}</h3>${cat ? `<div class="tags"><span class="tag brand">${esc(cat.n)}</span></div>` : ''}</div></div>`;
@@ -591,16 +591,18 @@ function openFix(it, cat) {
       ${it.d || it.a ? `<div class="info-row">${I('pin')}<div class="grow">${esc(it.d || `حماة، ${it.a}`)}</div></div>` : ''}</div>
     <p style="color:var(--ink-2);margin:4px 0 12px">إن كان فيها أي معلومة خاطئة فاختاروا ما يناسب:</p>
     <div class="detail-actions" style="grid-template-columns:1fr">
-      <button class="qa" type="button" data-fx="wrong">${I('x')}الرقم خطأ — حذف</button>
+      <button class="qa" type="button" data-fx="wrong">${I('x')}الرقم خطأ</button>
       <button class="qa" type="button" data-fx="edit">${I('edit')}تعديل</button>
       <button class="qa" type="button" data-fx="report">${I('flag')}إبلاغ</button>
     </div>`;
   const back = `<button class="btn btn-soft" type="button" data-fx="home">رجوع</button>`;
   const views = {
     home,
-    wrong: () => `<p style="margin:0 0 12px;color:var(--ink-2)">اختاروا الرقم الخاطئ ليُحذف من الدليل ولا يُضاف مرة أخرى:</p>
-      ${(it.p || []).map((x) => `<button class="btn o-del btn-block" type="button" data-fx="del" data-ph="${esc(x)}" style="margin-bottom:8px;justify-content:center"><bdi dir="ltr">${esc(x)}</bdi> — احذفوه</button>`).join('') || '<p>لا يوجد رقم في البطاقة.</p>'}
-      <div class="row">${back}</div>`,
+    wrong: () => `<form class="form" data-fx-form="wrong" novalidate>
+      <p style="margin:0;color:var(--ink-2)">اكتبوا الرقم الصحيح (أو أن الرقم ليس لكم) وسنصحّح بطاقتكم.</p>
+      <label class="field"><span>الرقم الصحيح أو ملاحظتكم</span><textarea class="input" name="details" rows="3" maxlength="500" required placeholder="مثال: الرقم الصحيح 09… / هذا الرقم ليس لنا"></textarea></label>
+      <div class="form-error" hidden></div>
+      <button class="btn btn-primary btn-lg btn-block" type="submit">إرسال</button><div class="row">${back}</div></form>`,
     edit: () => `<form class="form" data-fx-form="edit" novalidate>
       <p style="margin:0;color:var(--ink-2)">اكتبوا البيانات الصحيحة وسنراجعها ونحدّث بطاقتكم.</p>
       <label class="field"><span>الاسم</span><input class="input" name="name" maxlength="160" value="${esc(it.n)}"></label>
@@ -624,16 +626,6 @@ function openFix(it, cat) {
     if (!b) return;
     e.preventDefault();
     const v = b.dataset.fx;
-    if (v === 'del') {
-      b.disabled = true;
-      try {
-        const r = await rpc('fix_delete', { p_listing: it.i, p_phone: b.dataset.ph });
-        if (!r || !r.ok) { b.disabled = false; toast(r && r.error === 'rate' ? 'محاولات كثيرة اليوم، حاولوا لاحقاً.' : 'تعذّر الحذف، ربما حُذف الرقم من قبل.'); return; }
-        it.p = (it.p || []).filter((x) => x !== b.dataset.ph);
-        done('✅', 'حُذف الرقم', 'لن يُضاف هذا الرقم إلى الدليل مرة أخرى. شكراً لكم 🌿');
-      } catch { b.disabled = false; toast('تعذّر الاتصال، حاولوا مجدداً.'); }
-      return;
-    }
     if (views[v]) show(v);
   });
   sh.addEventListener('submit', async (e) => {
@@ -648,12 +640,12 @@ function openFix(it, cat) {
       details = `طلب تعديل من صاحب النشاط:\nالاسم: ${fd.name}\nالرقم: ${fd.phone}\nالعنوان: ${fd.address}\nالموقع: ${fd.map}\n(القديم: ${it.n} | ${(it.p || []).join(' / ')} | ${it.d || '-'})`;
     } else {
       details = String(fd.details || '').trim();
-      if (details.length < 5) { err.textContent = 'اكتبوا الأخطاء بوضوح (5 أحرف على الأقل).'; err.hidden = false; return; }
-      details = `بلاغ من صاحب النشاط:\n${details}`;
+      if (details.length < 5) { err.textContent = 'اكتبوا بوضوح (5 أحرف على الأقل).'; err.hidden = false; return; }
+      details = `${f.dataset.fxForm === 'wrong' ? 'الرقم خطأ — من صاحب النشاط' : 'بلاغ من صاحب النشاط'}:\n${details}`;
     }
     btn.disabled = true;
     try {
-      const r = await rpc('submit_report', { payload: { listing_id: it.i, kind: 'wrong_info', details: details.slice(0, 1000), contact: '' } });
+      const r = await rpc('submit_report', { payload: { listing_id: it.i, kind: f.dataset.fxForm === 'report' ? 'other' : (f.dataset.fxForm === 'wrong' ? 'wrong_number' : 'wrong_info'), details: details.slice(0, 1000), contact: '' } });
       if (!r || !r.ok) { btn.disabled = false; err.textContent = r && r.error === 'rate' ? 'محاولات كثيرة، حاولوا لاحقاً.' : 'تعذّر الإرسال، حاولوا مجدداً.'; err.hidden = false; return; }
       done('📨', 'وصلتنا رسالتكم', 'سنراجعها ونحدّث بطاقتكم. شكراً لكم 🌿');
     } catch { btn.disabled = false; err.textContent = 'تعذّر الاتصال، حاولوا مجدداً.'; err.hidden = false; }

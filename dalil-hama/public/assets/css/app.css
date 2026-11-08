@@ -469,4 +469,3 @@ select.input { appearance: none; -webkit-appearance: none; background-image: url
 @media (min-width: 900px) { .admin-fab { bottom: 20px; } }
 
 .admin-fab.preview { background: var(--gold-2, #e6b34a); color: #241904; }
-.btn.o-del { background: var(--danger); color: #fff; }
