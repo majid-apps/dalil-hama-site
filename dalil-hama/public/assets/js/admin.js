@@ -819,7 +819,8 @@ function viewDash(el) {
 
 /** المرشح: رقم أضافته الإدارة أو استوردته للمراجعة (لم يطلب صاحبه الإضافة). الطلب: ما أرسله الزوار بأنفسهم. */
 const isCand = (r) => r.status === 'pending' && r.source !== 'public';
-const CONSENT_MSG = (name, link) => `السلام عليكم ورحمة الله،\nنحن فريق «دليل حماة — حماة بين يديك»، دليل إلكتروني مجاني لأهل المدينة.\nيسعدنا إدراج «${name}» (الاسم والتصنيف والرقم فقط) في الدليل، ولن نضيفه إلا بموافقتكم.\n${link ? `👈 للموافقة أو الرفض بضغطة واحدة:\n${link}\nوإن لم يكن هذا الرقم لكم فاختاروا «الرقم خطأ» فيُحذف فوراً.\nويمكنكم أيضاً الرد بكلمة «موافق».` : '✅ للموافقة أرسلوا كلمة «موافق».'}\n❌ وإن لم ترغبوا فلا حاجة للرد، ولن يُنشر شيء.\nويمكنكم طلب التعديل أو الحذف في أي وقت.${link ? '' : '\nالموقع: https://dalil-hama.majid.cfd'}\nشاكرين لكم 🌿`;
+const mapOf = (r) => r.map_url || (r.lat != null && r.lng != null ? `https://www.google.com/maps?q=${r.lat},${r.lng}` : '');
+const CONSENT_MSG = (r, link) => `السلام عليكم ورحمة الله وبركاته 🌿\nحصلنا على رقمكم باسم «${r.name}»\n${(r.phones || []).length ? `أرقامكم: ${r.phones.join('، ')}\n` : ''}${r.address ? `عنوانكم: ${r.address}\n` : ''}${mapOf(r) ? `موقعكم: ${mapOf(r)}\n` : ''}من تطبيق «دليل حماة بين يديك»،\nفإن كان هناك أي معلومة خاطئة فيمكنكم:\n✏️ تعديلها\nأو 🗑 حذفها\nأو 🚩 إبلاغنا\n${link ? `👈 ${link}` : `بالرد علينا، أو من الموقع: https://dalil-hama.majid.cfd`}\nشاكرين لكم تعاونكم وتفهمكم 🌿`;
 /** رابط شخصي لصاحب الرقم (migration 0012): رمز عشوائي 128 بت يوضع في الرسالة، ولا يُسجَّل في القاعدة إلا لحظة فتح واتساب */
 const ownerToken = () => b64u.enc(crypto.getRandomValues(new Uint8Array(16)));
 const ownerLink = (t) => `${location.origin}/r/#${t}`;
@@ -907,7 +908,7 @@ function messageQueue(rows, redraw) {
     const tok = ownerToken();
     box.innerHTML = `<p class="muted" style="margin-top:0">${fmtNum(i + 1)} من ${fmtNum(queue.length)}</p>
       <div class="req"><h3 style="margin:0 0 4px">${esc(r.name)}</h3><div class="muted"><bdi dir="ltr">${esc(mob)}</bdi> · ${esc(catName(r.category_id))}</div></div>
-      <div class="ops mt"><a class="btn btn-wa btn-lg grow" id="mq-open" href="${waHref(mob, CONSENT_MSG(r.name, ownerLink(tok)))}" target="_blank" rel="noopener">${I('wa', 'sm')}فتح واتساب وإرسال</a>
+      <div class="ops mt"><a class="btn btn-wa btn-lg grow" id="mq-open" href="${waHref(mob, CONSENT_MSG(r, ownerLink(tok)))}" target="_blank" rel="noopener">${I('wa', 'sm')}فتح واتساب وإرسال</a>
       <button class="btn btn-soft" id="mq-skip">تخطّي</button></div>
       <p class="muted" style="font-size:13px">بعد إرسال الرسالة في واتساب ارجع هنا (زر الرجوع) ثم اضغط الزر مرة أخرى للتالي. تُسجَّل «أُرسلت» تلقائياً عند فتح واتساب.</p>`;
     box.querySelector('#mq-open').onclick = () => { registerOwnerLink(r.id, mob, tok); mark(r); i++; setTimeout(show, 400); };
@@ -1086,7 +1087,7 @@ function viewPending(el, mode = 'req') {
         <button class="btn btn-danger" data-reject="${r.id}">${I('x', 'sm')}استبعاد</button>
       </div></div>` : `<div class="ops">
         <button class="btn btn-primary" data-approve="${r.id}">${I('check', 'sm')}${cand ? 'وافق — انشر' : 'قبول ونشر'}</button>
-        ${mob ? `<a class="btn btn-wa" href="${waHref(mob, cand ? CONSENT_MSG(r.name, ownerLink(tok)) : `مرحباً، وصلنا طلب إضافة «${r.name}» إلى دليل حماة. نود التأكد من صحة البيانات قبل النشر 🌿`)}" target="_blank" rel="noopener"${cand && !isSent(r) ? ` data-wa-sent="${r.id}"` : ''}${cand ? ` data-owner="${r.id}" data-ph="${esc(mob)}" data-tok="${tok}"` : ''}>${I('wa', 'sm')}${cand ? 'رسالة الموافقة' : 'تحقق عبر واتساب'}</a>` : ''}
+        ${mob ? `<a class="btn btn-wa" href="${waHref(mob, cand ? CONSENT_MSG(r, ownerLink(tok)) : `مرحباً، وصلنا طلب إضافة «${r.name}» إلى دليل حماة. نود التأكد من صحة البيانات قبل النشر 🌿`)}" target="_blank" rel="noopener"${cand && !isSent(r) ? ` data-wa-sent="${r.id}"` : ''}${cand ? ` data-owner="${r.id}" data-ph="${esc(mob)}" data-tok="${tok}"` : ''}>${I('wa', 'sm')}${cand ? 'رسالة الموافقة' : 'تحقق عبر واتساب'}</a>` : ''}
         ${r.phones && r.phones[0] ? `<a class="btn btn-soft" href="${telHref(r.phones[0])}">${I('phone', 'sm')}اتصال</a>` : ''}
         ${cand && isSent(r) ? `<button class="btn btn-soft" data-sent="${r.id}">إلغاء «أُرسلت»</button>` : ''}
         ${cand && !isSent(r) && !mob ? `<button class="btn btn-soft" data-sent="${r.id}">${SENT} تواصلتُ معه</button>` : ''}
