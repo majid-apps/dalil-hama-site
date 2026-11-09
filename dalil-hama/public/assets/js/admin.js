@@ -2070,6 +2070,8 @@ function viewSettings(el) {
       <form class="form-grid two" id="s-ct">
         <label class="field"><span>واتساب (دولي بدون +)</span><input class="input" name="whatsapp" dir="ltr" value="${esc(c.whatsapp || '')}"></label>
         <label class="field"><span>إنستغرام (اسم المستخدم)</span><input class="input" name="instagram" dir="ltr" value="${esc(c.instagram || '')}"></label>
+        <label class="field"><span>إكس / تويتر (اسم المستخدم)</span><input class="input" name="x" dir="ltr" value="${esc(c.x || '')}"></label>
+        <label class="field"><span>تلغرام (اسم المستخدم)</span><input class="input" name="telegram" dir="ltr" value="${esc(c.telegram || '')}"></label>
         <label class="field full"><span>فيسبوك (رابط)</span><input class="input" name="facebook" dir="ltr" value="${esc(c.facebook || '')}"></label>
         <div class="full"><button class="btn btn-primary" ${owner ? '' : 'disabled'}>حفظ</button></div></form></div>
     <div class="panel"><h2>${I('settings')}تغيير كلمة المرور</h2>
@@ -2085,7 +2087,9 @@ function viewSettings(el) {
     } catch (err) { toast(errMsg(err), true); }
   };
   $('#s-an').onsubmit = (e) => { e.preventDefault(); const fd = new FormData(e.target); saveSetting('announcement', { active: fd.has('active'), text: fd.get('text').trim(), link: fd.get('link').trim() }); };
-  $('#s-ct').onsubmit = (e) => { e.preventDefault(); const fd = new FormData(e.target); saveSetting('contact', { whatsapp: fd.get('whatsapp').replace(/\D/g, ''), instagram: fd.get('instagram').replace(/^@/, '').trim(), facebook: fd.get('facebook').trim() }); };
+  // اسم مستخدم من «@name» أو رابط (x.com/name · t.me/name) ← name
+  const handle = (v) => String(v || '').trim().replace(/^https?:\/\/(www\.)?(x\.com|twitter\.com|t\.me)\//i, '').replace(/^@/, '').split(/[/?#]/)[0].trim();
+  $('#s-ct').onsubmit = (e) => { e.preventDefault(); const fd = new FormData(e.target); saveSetting('contact', { whatsapp: fd.get('whatsapp').replace(/\D/g, ''), instagram: fd.get('instagram').replace(/^@/, '').trim(), x: handle(fd.get('x')), telegram: handle(fd.get('telegram')), facebook: fd.get('facebook').trim() }); };
   $('#em-add').onclick = () => $('#em-rows').insertAdjacentHTML('beforeend', emRow({}));
   $('#em-rows').onclick = (e) => { const b = e.target.closest('[data-rm]'); if (b) b.closest('.ph').remove(); };
   $('#s-em').onsubmit = (e) => {
