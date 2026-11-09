@@ -792,6 +792,7 @@ function viewDash(el) {
     <div class="quick-links">
       <a class="btn btn-primary" href="/">${I('external', 'sm')}فتح الدليل العام</a>
       <a class="btn btn-gold" href="#new">${I('plus', 'sm')}نشاط جديد</a>
+      <a class="btn btn-soft" href="#cands?tab=later">${I('search', 'sm')}قائمة البحث (${fmtNum(A.listings.filter(isLater).length)})</a>
     </div>
     <div class="more-links">
       <a href="#quality">${I('check')}جودة البيانات</a><a href="#cats">${I('grid')}التصنيفات</a><a href="#areas">${I('pin')}الأحياء</a>
