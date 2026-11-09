@@ -860,7 +860,7 @@ document.addEventListener('click', (e) => {
   if (actName === 'share' && it) { e.preventDefault(); share(it); return; }
   if (actName === 'share-site') {
     e.preventDefault();
-    const d = { title: 'دليل حماة', text: 'كل أرقام وعناوين حماة بين يديك 🌿', url: `${location.origin}/` };
+    const d = { title: 'دليل حماة', text: '🌿 دليل حماة — حماة بين يديك\nكل أرقام وعناوين المدينة في مكان واحد: أطباء، صيدليات، مطاعم، محلات وخدمات.\nابحث واتصل بلمسة واحدة 👇', url: `${location.origin}/` };
     if (navigator.share) navigator.share(d).catch(() => {}); else copy(`${d.text}\n${d.url}`, 'تم نسخ رابط الدليل');
     return;
   }
