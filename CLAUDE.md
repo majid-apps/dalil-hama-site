@@ -15,7 +15,7 @@
 - اعمل على فرع جانبي، ولا تدمج في `main` دون موافقة مجيد (الدمج ينشر على الموقع الحي خلال دقائق).
 - تعديل القاعدة = ملف جديد برقم تالٍ في `dalil-hama/supabase/migrations/` ثم على السيرفر `sudo dalil-hama-site install-db`.
 - الأوامر: `sudo dalil-hama-site status | update | previous`.
-- عند تغيير js/css ارفع `?v=` في `index.html` و`admin/index.html` ورقم `VERSION` في `sw.js`. وطابق أرقام `?v=` الخاصة بالإدارة في قائمة `SHELL` داخل `sw.js` (الإدارة تُخزَّن على الجوال وتفتح فوراً ثم تتحدّث في الخلفية). لا سكربتات مضمّنة في HTML. لا تغيّر `assets/js/config.js`.
+- عند تغيير js/css ارفع `?v=` في `index.html` و`admin/index.html` ورقم `VERSION` في `sw.js`. (الإدارة لم تعد في قائمة `SHELL`؛ تُخزَّن على جوال مجيد عند أول فتح وتفتح فوراً ثم تتحدّث في الخلفية.) وحّد رقم `?v=` لـ`app.css` في كل الصفحات. لا سكربتات مضمّنة في HTML. لا تغيّر `assets/js/config.js`.
 
 ## الإصدارات
 - `main` = ما يعمل على الموقع الحي. كل إصدار معتمد يُحفظ كفرع `release/vX.Y.Z` (رفع الوسوم tags مرفوض من جلسات Claude). الحالي: `release/v1.8.1` (قبله `release/v1.8.0` و`release/v1.7.0` و`release/v1.6.0` و`release/v1.5.1` و`release/v1.5.0` و`release/v1.4.0` و`release/v1.3.0` و`release/v1.2.1` و`release/v1.2.0` و`release/v1.1.0` و`release/v1.0.0`). الرجوع على السيرفر: `sudo dalil-hama-site previous`.

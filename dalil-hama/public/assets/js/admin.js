@@ -1123,8 +1123,6 @@ function viewPending(el, mode = 'req') {
     if (e.target.closest('[data-more]')) { A.pendLimit[mode] = (A.pendLimit[mode] || PEND_PAGE) + PEND_PAGE; draw(); return; }
     const at = e.target.closest('[data-attach]');
     if (at) { attachCand(Number(at.dataset.attach), at.dataset.to ? Number(at.dataset.to) : null, again); return; }
-    const ow = e.target.closest('[data-tok]');
-    if (ow) registerOwnerLink(Number(ow.dataset.owner), ow.dataset.ph, ow.dataset.tok);
     const wa = e.target.closest('[data-wa-sent]');
     if (wa) {
       // يفتح واتساب برسالة الموافقة، ويُسجَّل «أُرسلت» في الخلفية (التراجع من تبويب «بانتظار الرد»)

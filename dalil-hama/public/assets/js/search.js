@@ -172,6 +172,7 @@ export class SearchIndex {
     }
 
     scored.sort((a, b) => b[0] - a[0] || a[1].n.localeCompare(b[1].n, 'ar'));
+    if (fuzzy && scored.length > 60) scored.length = 60;
     const cats = [...new Set([...catHits, ...fuzzyCat].flatMap((s) => [...s]))].slice(0, 4);
     return { results: scored.map((x) => x[1]), cats, fuzzy, terms: origStems };
   }
