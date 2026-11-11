@@ -9,7 +9,7 @@ const ICONS = '/assets/img/icons.svg';
 const I = (name, cls = '') => `<svg class="ico ${cls}" aria-hidden="true"><use href="${ICONS}#${name}"/></svg>`;
 const $ = (s, r = document) => r.querySelector(s);
 const CACHE_KEY = 'dh:data:v1';
-const FULL_SYNC_EVERY = 12 * 3600 * 1000;
+const FULL_SYNC_EVERY = 7 * 24 * 3600 * 1000;
 const PAGE = 36;
 /** رسالة واتساب الموحّدة لكل بطاقة (للجميع): الاسم والأرقام والعنوان والموقع ثم رابط البطاقة للتعديل أو الإبلاغ.
  *  رابط صاحب الرقم الخاص (تعديل/حذف) يُرسل من زر «إشعار صاحب الرقم» في الإدارة وحدها، فلا يُولَّد رمز لأي زائر. */
@@ -60,8 +60,9 @@ function applyData(data) {
     state.counts.set(it.c, (state.counts.get(it.c) || 0) + 1);
     if (it.a) state.areaCounts.set(it.a, (state.areaCounts.get(it.a) || 0) + 1);
   }
+  const keepView = state.loaded && window.scrollY > 300 && (params().q || params().c || params().a || params().v);
   state.loaded = true;
-  state.viewKey = '';
+  if (!keepView) state.viewKey = '';
   renderChrome();
   sync();
 }
@@ -102,7 +103,7 @@ async function loadData() {
   } catch (err) {
     console.warn('sync failed', err);
     if (!cached) {
-      $('#view').innerHTML = `<div class="empty"><div class="big">📡</div><h3>تعذّر الاتصال</h3><p>تحقق من اتصالك بالإنترنت ثم حاول مجدداً.</p><div class="row"><button class="btn btn-primary" onclick="location.reload()">${I('refresh', 'sm')}إعادة المحاولة</button></div></div>`;
+      $('#view').innerHTML = `<div class="empty"><div class="big">📡</div><h3>تعذّر الاتصال</h3><p>تحقق من اتصالك بالإنترنت ثم حاول مجدداً.</p><div class="row"><button class="btn btn-primary" type="button" data-act="reload">${I('refresh', 'sm')}إعادة المحاولة</button></div></div>`;
     }
   }
 }
@@ -386,7 +387,7 @@ function renderList(p, mode) {
     if (geoStale() && !state.geoTried) { state.geoTried = true; locate(true); }
   }
   if (res.cats && res.cats.length && p.q && !p.c) {
-    extra += `<div class="cat-suggest">${res.cats.map((id) => state.catById.get(id)).filter(Boolean).map((c) => `<a href="/?c=${c.i}">${c.ic} كل ${esc(c.n)} <small>(${fmtNum(state.counts.get(c.i) || 0)})</small></a>`).join('')}</div>`;
+    extra += `<div class="cat-suggest">${res.cats.map((id) => state.catById.get(id)).filter((c) => c && state.counts.get(c.i)).map((c) => `<a href="/?c=${c.i}">${c.ic} كل ${esc(c.n)} <small>(${fmtNum(state.counts.get(c.i) || 0)})</small></a>`).join('')}</div>`;
   }
   if (res.fuzzy && list.length) extra += `<p class="notice">لم نجد تطابقاً تاماً، إليك أقرب النتائج:</p>`;
   if (res.phone) extra += `<p class="notice">نتائج البحث بالرقم:</p>`;
@@ -398,7 +399,7 @@ function renderList(p, mode) {
     ${extra}
     ${p.m && mode !== 'favs' ? '<div class="map-box" id="map"></div>' : '<div class="list" id="list"></div><div class="sentinel" id="sentinel"></div>'}`;
 
-  if (p.q) scheduleSearchLog(p.q, mode === 'search' && !p.c && !p.a ? list.length : state.index.search(p.q).results.length);
+  if (p.q && !res.phone) scheduleSearchLog(p.q, mode === 'search' && !p.c && !p.a ? list.length : state.index.search(p.q).results.length);
   if (!list.length && !(mode === 'near' && !state.geo)) {
     ($('#list') || $('#map')).outerHTML = emptyState(mode, p);
     return;
@@ -855,6 +856,7 @@ document.addEventListener('click', (e) => {
 
   if (actName === 'call' || actName === 'whatsapp' || actName === 'map') { track(id, actName); return; }
   if (actName === 'sos') return;
+  if (actName === 'reload') { location.reload(); return; }
   if (actName === 'open' && !(e.ctrlKey || e.metaKey || e.shiftKey || e.button)) { e.preventDefault(); go({ l: id }, { keep: true }); return; }
   if (actName === 'fav') { e.preventDefault(); toggleFav(id, act); return; }
   if (actName === 'share' && it) { e.preventDefault(); share(it); return; }
