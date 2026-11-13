@@ -67,7 +67,13 @@ export function normalizeMap(input) {
   return { text: out, map };
 }
 
-export const normalize = (s) => normalizeMap(s).text;
+// المسار السريع (نفس نتيجة normalizeMap.text بلا خريطة المواقع): فهرسة 11 ألف نشاط عند كل فتح تمرّ منه
+const DROP_ALL = new RegExp(DROP.source, 'g');
+const MAPPED = /[أإآٱةىؤئ٠-٩۰-۹]/g;
+const NON_WORD = /[^\p{L}\p{N}+]+/gu;
+export function normalize(input) {
+  return String(input || '').replace(DROP_ALL, '').replace(MAPPED, (c) => CHAR_MAP[c]).toLowerCase().replace(NON_WORD, ' ').trim();
+}
 
 export function toLatinDigits(s) {
   return String(s || '').replace(/[٠-٩۰-۹]/g, (d) => DIGIT_MAP[d]);

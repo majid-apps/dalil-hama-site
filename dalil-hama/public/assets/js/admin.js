@@ -2057,6 +2057,7 @@ function viewSettings(el) {
   const an = A.settings.announcement || {};
   const em = A.settings.emergency || [];
   const owner = A.me.role === 'owner';
+  const duty = A.settings.duty || {};
   el.innerHTML = `
     <div class="panel" style="margin-top:0"><h2>${I('megaphone')}إعلان أعلى الصفحة</h2>
       <form class="form" id="s-an"><div class="toggles"><label><input type="checkbox" name="active" ${an.active ? 'checked' : ''}>إظهار الإعلان</label></div>
@@ -2066,6 +2067,17 @@ function viewSettings(el) {
     <div class="panel"><h2>${I('phone')}أرقام الطوارئ في الصفحة الرئيسية</h2>
       <form class="form" id="s-em"><div id="em-rows" class="form">${em.map((e) => emRow(e)).join('')}</div>
         <div class="toolbar"><button class="btn btn-ghost" type="button" id="em-add">${I('plus', 'sm')}رقم</button><button class="btn btn-primary" ${owner ? '' : 'disabled'}>حفظ</button></div></form></div>
+    <div class="panel"><h2>${I('pin')}الصيدليات المناوبة</h2>
+      <form class="form" id="s-duty">
+        <p class="muted" style="margin:0">اختر صيدليات المناوبة وتاريخ بدايتها ونهايتها، فتظهر للزوار في أعلى الرئيسية وفي صفحة الصيدليات، وتختفي وحدها بعد آخر يوم.</p>
+        <div class="form-grid two">
+          <label class="field"><span>من تاريخ</span><input class="input" type="date" name="from" value="${esc(duty.from || '')}"></label>
+          <label class="field"><span>إلى تاريخ <em>(اختياري)</em></span><input class="input" type="date" name="to" value="${esc(duty.to || '')}"></label>
+        </div>
+        <label class="field"><span>ملاحظة للزوار <em>(اختياري)</em></span><input class="input" name="note" maxlength="120" value="${esc(duty.note || '')}" placeholder="مثال: مناوبة هذا الأسبوع"></label>
+        <div class="field"><span>الصيدليات المناوبة</span><div id="duty-chosen"></div>
+          <input class="input" id="duty-q" placeholder="ابحث باسم الصيدلية أو رقمها لإضافتها" autocomplete="off"><div id="duty-res"></div></div>
+        <div class="toolbar"><button class="btn btn-primary" ${owner ? '' : 'disabled'}>حفظ</button><button class="btn btn-ghost" type="button" id="duty-off" ${owner ? '' : 'disabled'}>إيقاف العرض</button></div></form></div>
     <div class="panel"><h2>${I('wa')}وسائل التواصل مع الدليل</h2>
       <form class="form-grid two" id="s-ct">
         <label class="field"><span>واتساب (دولي بدون +)</span><input class="input" name="whatsapp" dir="ltr" value="${esc(c.whatsapp || '')}"></label>
@@ -2090,6 +2102,37 @@ function viewSettings(el) {
   // اسم مستخدم من «@name» أو رابط (x.com/name · t.me/name) ← name
   const handle = (v) => String(v || '').trim().replace(/^https?:\/\/(www\.)?(x\.com|twitter\.com|t\.me)\//i, '').replace(/^@/, '').split(/[/?#]/)[0].trim();
   $('#s-ct').onsubmit = (e) => { e.preventDefault(); const fd = new FormData(e.target); saveSetting('contact', { whatsapp: fd.get('whatsapp').replace(/\D/g, ''), instagram: fd.get('instagram').replace(/^@/, '').trim(), x: handle(fd.get('x')), telegram: handle(fd.get('telegram')), facebook: fd.get('facebook').trim() }); };
+  // الصيدليات المناوبة: تُخزَّن معرّفاتها في الإعداد العام duty ويعرضها الدليل بين تاريخي البداية والنهاية
+  let dutyIds = (duty.ids || []).filter((id) => A.byId.has(id));
+  const dutyDraw = () => {
+    $('#duty-chosen').innerHTML = dutyIds.map((id) => { const r = A.byId.get(id); return `<div class="phone-row" style="margin-bottom:6px"><div class="num" style="flex:1"><b>${esc(r.name)}</b><span class="kind">${esc(r.area || '')} ${phonesHtml(r)}</span></div><button class="icon-btn" type="button" data-duty-rm="${id}" aria-label="إزالة">${I('x', 'sm')}</button></div>`; }).join('')
+      || '<p class="muted" style="margin:0 0 8px">لم تُختر صيدلية بعد.</p>';
+  };
+  dutyDraw();
+  $('#duty-q').oninput = (e) => {
+    const q = e.target.value.trim();
+    ensureIndex();
+    const rows = q ? A.index.search(q).results.map((x) => x._row).filter((r) => r.status === 'approved' && !dutyIds.includes(r.id)).slice(0, 8) : [];
+    $('#duty-res').innerHTML = rows.length ? `<div class="pick-list">${rows.map((r) => `<button type="button" data-duty-add="${r.id}">${esc(r.name)}<small>${esc(catName(r.category_id))}${r.area ? ' · ' + esc(r.area) : ''}</small></button>`).join('')}</div>` : '';
+  };
+  $('#s-duty').onclick = (e) => {
+    const add = e.target.closest('[data-duty-add]');
+    const rm = e.target.closest('[data-duty-rm]');
+    if (add) { dutyIds.push(Number(add.dataset.dutyAdd)); $('#duty-q').value = ''; $('#duty-res').innerHTML = ''; dutyDraw(); }
+    if (rm) { dutyIds = dutyIds.filter((id) => id !== Number(rm.dataset.dutyRm)); dutyDraw(); }
+  };
+  $('#s-duty').onsubmit = (e) => {
+    e.preventDefault();
+    if (!dutyIds.length) return toast('اختر صيدلية واحدة على الأقل، أو اضغط «إيقاف العرض»', true);
+    const fd = new FormData(e.target);
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const from = fd.get('from') || today;
+    const to = fd.get('to') || from;
+    if (to < from) return toast('تاريخ النهاية قبل البداية', true);
+    saveSetting('duty', { from, to, ids: dutyIds, note: fd.get('note').trim() });
+  };
+  $('#duty-off').onclick = () => { dutyIds = []; dutyDraw(); saveSetting('duty', { ids: [] }); };
   $('#em-add').onclick = () => $('#em-rows').insertAdjacentHTML('beforeend', emRow({}));
   $('#em-rows').onclick = (e) => { const b = e.target.closest('[data-rm]'); if (b) b.closest('.ph').remove(); };
   $('#s-em').onsubmit = (e) => {

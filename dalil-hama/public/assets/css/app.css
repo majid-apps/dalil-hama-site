@@ -254,6 +254,8 @@ main { display: block; }
 .pill[aria-pressed="true"], .pill.on { background: var(--ink); color: var(--bg); border-color: var(--ink); }
 .pill .x { opacity: .7; }
 .pill small { font-size: 12.5px; }
+.card-sub { color: var(--ink-2); font-size: 13.5px; line-height: 1.45; margin-top: 2px; }
+.detail-sub { color: var(--ink-2); font-size: 14.5px; margin: 2px 0 4px; }
 select.pill { appearance: none; -webkit-appearance: none; padding-inline-end: 34px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' fill='none' stroke='%237a8b87' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: left 13px center; }
 .cat-suggest { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 12px; }
 .cat-suggest a { display: inline-flex; align-items: center; gap: 6px; padding: 7px 12px; border-radius: 12px; background: var(--brand-soft); color: var(--brand); font-weight: 700; font-size: 14px; }

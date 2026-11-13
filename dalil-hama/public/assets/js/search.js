@@ -47,9 +47,30 @@ export class SearchIndex {
     this.catTokens = [];
     this.areaNames = [];
     this.rural = new Set();
+    this.gen = 0;
   }
 
   setData(items, cats, areas) {
+    this._setup(cats, areas);
+    for (const it of items) this.prepare(it);
+    this.items = items;
+  }
+
+  /** مثل setData لكن على دفعات تتخلّلها فترات راحة للمتصفح، فلا يتجمّد الجوال أثناء فهرسة آلاف الأنشطة.
+   *  تبقى القائمة القديمة قيد الاستعمال حتى تكتمل الجديدة؛ وتعيد false إن جاء تحديث أحدث قبل اكتمالها. */
+  async setDataChunked(items, cats, areas, chunk = 1000) {
+    const gen = ++this.gen;
+    this._setup(cats, areas);
+    for (let i = 0; i < items.length; i += chunk) {
+      for (let j = i; j < Math.min(i + chunk, items.length); j++) this.prepare(items[j]);
+      if (i + chunk < items.length) await new Promise((r) => setTimeout(r, 0));
+      if (gen !== this.gen) return false;
+    }
+    this.items = items;
+    return true;
+  }
+
+  _setup(cats, areas) {
     this.cats = new Map(cats.map((c) => [c.i, c]));
     this.catTokens = cats.map((c) => ({
       id: c.i,
@@ -62,8 +83,6 @@ export class SearchIndex {
     this.areaNames = areas.map((a) => ({ name: a.n, norm: normalize(a.n), stems: tokens(a.n).map(stem) }));
     // بلدات «ريف حماة»: نشاط حيّه بلدة ريفية لا يظهر في قوائم المدينة بل في بوابة الريف
     this.rural = new Set(areas.filter((a) => a.r).map((a) => a.n));
-    for (const it of items) this.prepare(it);
-    this.items = items;
   }
 
   prepare(it) {

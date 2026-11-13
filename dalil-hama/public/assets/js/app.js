@@ -31,7 +31,7 @@ const state = {
   city: [], rural: [], hasRural: false, ruralNames: new Set(), ruralCounts: new Map(), ruralAreaCounts: new Map(), allCounts: new Map(), allAreaCounts: new Map(),
   index: new SearchIndex(), favs: new Set(store.get('dh:favs', [])), recent: store.get('dh:recent', []),
   geo: store.get('dh:geo', null), list: [], terms: [], shown: 0, viewKey: '', loaded: false,
-  installEvt: null, viewed: new Set(), lastLogged: '',
+  installEvt: null, viewed: new Set(), lastLogged: '', indexReady: false, dataGen: 0,
 };
 
 // المدير المسجّل دخوله (من هذا المتصفح) يرى أزرار تعديل سريعة تفتح لوحة الإدارة مباشرة؛ الزائر العادي لا يرى شيئاً
@@ -52,7 +52,6 @@ function applyData(data) {
   state.settings = data.settings || {};
   state.items = data.items;
   state.byId = new Map(data.items.map((it) => [it.i, it]));
-  state.index.setData(state.items, state.cats, state.areas);
   state.ruralNames = new Set(state.areas.filter((a) => a.r).map((a) => a.n));
   state.counts = new Map();
   state.areaCounts = new Map();
@@ -71,12 +70,25 @@ function applyData(data) {
     if (it.a) { bump(r ? state.ruralAreaCounts : state.areaCounts, it.a); bump(state.allAreaCounts, it.a); }
   }
   state.hasRural = state.rural.length > 0;
-  const keepView = state.loaded && window.scrollY > 300 && (params().q || params().c || params().a || params().v);
+  const p = params();
+  const keepView = state.loaded && window.scrollY > 300 && (p.q || p.c || p.a || p.v);
+  const listView = needsIndex(p);
   state.loaded = true;
-  if (!keepView) state.viewKey = '';
   renderChrome();
-  sync();
+  // الرئيسية والتصنيفات والمفضلة لا تحتاج فهرس البحث فتُرسم فوراً؛ قوائم البحث تنتظر اكتمال الفهرسة (تجري على دفعات)
+  if (!listView) { if (!keepView) state.viewKey = ''; sync(); }
+  else if (!state.indexReady) { state.viewKey = ''; sync(); }
+  const gen = ++state.dataGen;
+  state.index.setDataChunked(state.items, state.cats, state.areas).then((ok) => {
+    if (!ok || gen !== state.dataGen) return;
+    const first = !state.indexReady;
+    state.indexReady = true;
+    if (needsIndex(params()) && (first || !keepView)) { state.viewKey = ''; sync(); }
+  });
 }
+
+// الشاشات التي تبحث في الفهرس: بحث، تصنيف، حي، ريف حماة، الأقرب
+function needsIndex(p) { return !!(p.q || p.c || p.a || p.v === 'near' || p.v === 'rural'); }
 
 function strip(data) {
   return { ...data, items: data.items.map(({ i, n, c, p, w, nw, a, d, m, g, y, x, s, e, t, f, v, k }) => ({ i, n, c, p, w, nw, a, d, m, g, y, x, s, e, t, f, v, k })) };
@@ -245,6 +257,18 @@ function emergencyFor(q) {
   return em.filter((e) => all || wanted.has(key(e.name)) || (digits.length >= 3 && digits === String(e.number).replace(/\D/g, '')));
 }
 
+// الصيدليات المناوبة: إعداد public «duty» من الإدارة { from, to, ids, note }؛ يظهر بين التاريخين بساعة الجهاز ويختفي وحده بعدهما
+const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+function dutyHtml() {
+  const d = state.settings.duty;
+  if (!d || !Array.isArray(d.ids) || !d.ids.length) return '';
+  const t = todayStr();
+  if ((d.from && t < d.from) || (d.to && t > d.to)) return '';
+  const list = d.ids.map((id) => state.byId.get(id)).filter(Boolean);
+  if (!list.length) return '';
+  return `<section class="section duty">${sectionHead('💊 صيدليات مناوبة', esc(d.note || 'اتصل قبل الذهاب للتأكد من المناوبة'))}<div class="rail">${list.map((it) => card(it)).join('')}</div></section>`;
+}
+
 function ruralCard() {
   const names = state.areas.filter((a) => a.r && state.ruralAreaCounts.get(a.n))
     .sort((a, b) => state.ruralAreaCounts.get(b.n) - state.ruralAreaCounts.get(a.n)).slice(0, 4).map((a) => a.n).join('، ');
@@ -262,7 +286,14 @@ function distOf(it) {
   return distance(state.geo.lat, state.geo.lng, it.y, it.x);
 }
 
+/** أسماء المستورَدة بصيغة «الاسم — المهنة»: الاسم عنوان البطاقة والمهنة سطر ثانوي (البيانات نفسها لا تتغير) */
+function splitName(n) {
+  const i = n.indexOf(' — ');
+  return i > 0 && i < n.length - 3 ? [n.slice(0, i), n.slice(i + 3)] : [n, ''];
+}
+
 function card(it, terms = []) {
+  const [title, sub] = splitName(it.n);
   const cat = catOf(it);
   const phone = it.p && it.p[0];
   const wa = waNumber(it);
@@ -273,7 +304,7 @@ function card(it, terms = []) {
       <a class="card-main" href="/?l=${it.i}" data-act="open">
         <div class="avatar" aria-hidden="true">${cat ? cat.ic : '📍'}</div>
         <div class="card-info">
-          <h3 class="card-name">${highlight(it.n, terms)}${it.v ? `<span class="badge" title="موثّق">${I('verified')}</span>` : ''}</h3>
+          <h3 class="card-name">${highlight(title, terms)}${it.v ? `<span class="badge" title="موثّق">${I('verified')}</span>` : ''}</h3>${sub ? `<div class="card-sub">${highlight(sub, terms)}</div>` : ''}
           <div class="meta">${cat ? `<span>${esc(cat.n)}</span>` : ''}${it.a ? `<span>${esc(it.a)}</span>` : ''}${d !== null ? `<span class="dist">${fmtDistance(d)}</span>` : ''}</div>
           ${it.p && it.p.length ? `<div class="phones">${it.p.slice(0, 2).map((x) => `<bdi dir="ltr">${esc(formatPhone(x))}</bdi>`).join('<i aria-hidden="true">·</i>')}</div>` : ''}
           ${it.d ? `<div class="addr">${esc(it.d)}</div>` : ''}
@@ -302,6 +333,8 @@ function render(p) {
   // ريف حماة: v=rural، أو رابط حيّ لبلدة ريفية (?a=سلمية) يُفتح في بوابة الريف
   const rural = state.hasRural && (p.v === 'rural' || (!p.v && p.a && state.ruralNames.has(p.a)));
   $('#status').textContent = '';
+  if (!state.indexReady && needsIndex(p)) { view.innerHTML = '<div class="section"><div class="list"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div></div>'; return; }
+  updateHead(p, rural);
   $('#q').placeholder = rural ? 'ابحث في ريف حماة…' : 'ابحث باسم، مهنة، حي أو رقم…';
   if (rural && !(p.q || p.c || p.a)) { setHeroCompact(true); view.innerHTML = renderRural(); }
   else if (rural) { setHeroCompact(true); renderList(p, 'rural'); }
@@ -361,6 +394,7 @@ function renderHome() {
   const areas = state.areas.filter((a) => state.areaCounts.get(a.n)).sort((a, b) => state.areaCounts.get(b.n) - state.areaCounts.get(a.n));
   let h = '';
   if (emergency.length) h += sosHtml(emergency);
+  h += dutyHtml();
   if (state.hasRural) h += ruralCard();
   if (recent.length) h += `<section class="section">${sectionHead('شاهدتها مؤخراً')}<div class="rail">${recent.map((it) => card(it)).join('')}</div></section>`;
   h += `<section class="section">${sectionHead('تصفّح حسب التصنيف', 'اختر ما تحتاجه وابدأ الاتصال مباشرة', `<a class="more-link" href="/?v=cats" data-nav="cats">الكل ${I('chev', 'sm')}</a>`)}
@@ -491,6 +525,8 @@ function renderList(p, mode) {
   if (sug.length) extra += `<div class="cat-suggest">${sug.join('')}</div>`;
   if (res.fuzzy && list.length) extra += `<p class="notice">لم نجد تطابقاً تاماً، إليك أقرب النتائج:</p>`;
   if (res.phone) extra += `<p class="notice">نتائج البحث بالرقم:</p>`;
+  const pharmacyView = p.c && /صيدلي/.test((state.catById.get(p.c) || {}).n || '');
+  if (mode === 'search' && (pharmacyView || (p.q && /مناوب/.test(normalize(p.q))))) extra = dutyHtml() + extra;
   const sos = p.q ? emergencyFor(p.q) : [];
   if (sos.length) extra = sosHtml(sos, true) + extra;
 
@@ -643,10 +679,39 @@ function removeSheetEls() {
 }
 
 const BASE_TITLE = document.title;
+const metaDesc = document.querySelector('meta[name="description"]');
+const BASE_DESC = metaDesc ? metaDesc.content : '';
+let pageTitle = BASE_TITLE;
+
+/** عنوان التبويب والوصف يتبعان الشاشة: «صيدليات في حماة — دليل حماة»، «ريف حماة · سلمية»، «نتائج «…»» */
+function updateHead(p, rural) {
+  const c = p.c ? state.catById.get(p.c) : null;
+  let title = BASE_TITLE;
+  let desc = BASE_DESC;
+  if (rural) {
+    const what = [c && c.n, p.a].filter(Boolean).join(' · ');
+    title = p.q ? `نتائج «${p.q}» في ريف حماة — دليل حماة` : `${what ? what + ' في ' : ''}ريف حماة — دليل حماة`;
+    desc = `أرقام وعناوين ${what || 'البلدات والقرى'} في ريف حماة${what ? '' : ': سلمية ومصياف والسقيلبية ومحردة وغيرها'}. اتصل أو راسل بلمسة واحدة.`;
+  } else if (p.q) {
+    title = `نتائج «${p.q}» — دليل حماة`;
+  } else if (c) {
+    title = `${c.n} في حماة — دليل حماة`;
+    desc = `أرقام وعناوين ${c.n} في مدينة حماة${state.counts.get(c.i) ? ` (${fmtNum(state.counts.get(c.i))} نشاطاً)` : ''}: ابحث واتصل أو راسل بلمسة واحدة.`;
+  } else if (p.a) {
+    title = `أنشطة حي ${p.a} في حماة — دليل حماة`;
+    desc = `أرقام وعناوين العيادات والصيدليات والمحلات والخدمات في حي ${p.a} بمدينة حماة.`;
+  } else if (p.v === 'cats') {
+    title = 'تصنيفات دليل حماة';
+  }
+  pageTitle = title;
+  if (!openSheetKey) document.title = title;
+  if (metaDesc) metaDesc.content = desc;
+}
+
 function hideSheet() {
   if (sheetEls) removeSheetEls();
   openSheetKey = null;
-  document.title = BASE_TITLE;
+  document.title = pageTitle;
   document.documentElement.style.overflow = '';
   if (lastFocus && document.body.contains(lastFocus)) lastFocus.focus({ preventScroll: true });
 }
@@ -713,7 +778,7 @@ function openItem(id) {
     ${ownerBox}
     <div class="detail-hero" style="--hue:${catHue(cat)}">
       <div class="avatar" aria-hidden="true">${cat ? cat.ic : '📍'}</div>
-      <div style="min-width:0"><h3>${esc(it.n)}${it.v ? `<span class="badge" title="موثّق">${I('verified')}</span>` : ''}</h3>
+      <div style="min-width:0"><h3>${esc(splitName(it.n)[0])}${it.v ? `<span class="badge" title="موثّق">${I('verified')}</span>` : ''}</h3>${splitName(it.n)[1] ? `<div class="detail-sub">${esc(splitName(it.n)[1])}</div>` : ''}
         <div class="tags">${cat ? `<a class="tag brand" href="${catHref(cat.i, isRural)}" data-cat="${cat.i}">${esc(cat.n)}</a>` : ''}${it.a ? `<a class="tag" href="${areaHref(it.a)}">${I('pin', 'sm')}${esc(it.a)}</a>` : ''}${it.f ? `<span class="tag gold">${I('star', 'sm')}مميّز</span>` : ''}${(it.t || []).map((t) => `<span class="tag">${esc(t)}</span>`).join('')}</div>
       </div>
     </div>
@@ -843,7 +908,7 @@ function openReport(hash) {
       const inp = box.querySelector('#pick-q');
       const pl = box.querySelector('#pick-list');
       inp.addEventListener('input', () => {
-        const r = inp.value.trim() ? state.index.search(inp.value).results.slice(0, 8) : [];
+        const r = inp.value.trim() && state.indexReady ? state.index.search(inp.value).results.slice(0, 8) : [];
         pl.innerHTML = r.map((it2) => `<button type="button" data-pick="${it2.i}">${esc(it2.n)}<small>${esc(catOf(it2)?.n || '')}${it2.p ? ' · ' + esc(it2.p[0]) : ''}</small></button>`).join('');
       });
     }
