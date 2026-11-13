@@ -517,8 +517,9 @@ function renderNavCounts() {
 function deepLink() {
   const [head, query = ''] = location.hash.slice(1).split('?');
   const [v, arg] = head.split('/');
-  if (v !== 'edit' && v !== 'new') return null;
+  if (v !== 'edit' && v !== 'new' && v !== 'rm') return null;
   const q = new URLSearchParams(query);
+  if (v === 'rm') return { v, id: Number(q.get('l')) || null, phone: normalizePhone(q.get('p') || '') };
   return { v, id: Number(arg) || null, preset: { name: (q.get('name') || '').slice(0, 160), phones: q.get('phone') ? [normalizePhone(q.get('phone'))] : [] } };
 }
 
@@ -538,7 +539,8 @@ function route() {
   if (!$('#content')) return; // شاشة الدخول ظاهرة (بعد الخروج أو انتهاء الجلسة): لا شاشة إدارة لنرسمها
   const dl = deepLink();
   let v = location.hash.slice(1).split('?')[0].split('/')[0] || 'dash';
-  if (dl) v = 'listings';
+  if (dl) v = dl.v === 'rm' ? 'inbox' : 'listings';
+  if (dl && dl.v === 'rm') A.inboxTab = 'rep';
   if (ALIAS[v]) { A.inboxTab = ALIAS[v][1]; v = ALIAS[v][0]; }
   if (v === 'diag') return viewDiag($('#content'));
   const def = VIEWS.find((x) => x[0] === v) || VIEWS[0];
@@ -552,8 +554,13 @@ function route() {
   fn($('#content'));
   if (dl) {
     // نُرجع العنوان إلى القائمة حتى لا يُعاد فتح النافذة عند التحديث أو الرجوع
-    history.replaceState(null, '', '#listings');
-    if (dl.v === 'new') editListing(null, dl.preset);
+    history.replaceState(null, '', dl.v === 'rm' ? '#inbox' : '#listings');
+    if (dl.v === 'rm') {
+      // رابط «الرقم خطأ» من رسالة واتساب: نافذة تأكيد واحدة لحذف الرقم
+      const t = A.byId.get(dl.id);
+      if (!dl.phone || !t || !(t.phones || []).includes(dl.phone)) toast('هذا الرقم لم يعد في البطاقة (حُذف سابقاً أو عُدّل)', true);
+      else phoneAction(dl.phone, 'delete', dl.id, () => route());
+    } else if (dl.v === 'new') editListing(null, dl.preset);
     else if (A.byId.has(dl.id)) editListing(dl.id);
     else toast('لم أجد هذا النشاط في الإدارة (ربما حُذف)', true);
   }
@@ -824,7 +831,7 @@ function viewDash(el) {
 /** المرشح: رقم أضافته الإدارة أو استوردته للمراجعة (لم يطلب صاحبه الإضافة). الطلب: ما أرسله الزوار بأنفسهم. */
 const isCand = (r) => r.status === 'pending' && r.source !== 'public';
 const mapOf = (r) => r.map_url || (r.lat != null && r.lng != null ? `https://www.google.com/maps?q=${r.lat},${r.lng}` : '');
-const CONSENT_MSG = (r, link) => `السلام عليكم ورحمة الله وبركاته 🌿\nحصلنا على رقمكم باسم «${r.name}»\n${(r.phones || []).length ? `أرقامكم: ${r.phones.join('، ')}\n` : ''}${r.address ? `عنوانكم: ${r.address}\n` : ''}${mapOf(r) ? `موقعكم: ${mapOf(r)}\n` : ''}من تطبيق «دليل حماة بين يديك»،\nفإن كان هناك أي معلومة خاطئة فيمكنكم:\n✏️ تعديلها\nأو 🗑 حذفها\nأو 🚩 إبلاغنا\n${link ? `👈 ${link}` : `بالرد علينا، أو من الموقع: https://dalil-hama.majid.cfd`}\nشاكرين لكم تعاونكم وتفهمكم 🌿`;
+const CONSENT_MSG = (r, link) => `السلام عليكم ورحمة الله وبركاته 🌿\nحصلنا على رقمكم باسم «${r.name}»\n${(r.phones || []).length ? `أرقامكم: ${r.phones.join('، ')}\n` : ''}${r.address ? `عنوانكم: ${r.address}\n` : ''}${mapOf(r) ? `موقعكم: ${mapOf(r)}\n` : ''}من تطبيق «دليل حماة بين يديك»،\nفإن كان هناك أي معلومة خاطئة فيمكنكم:\n${r.status === 'pending' ? '✅ الموافقة على نشرها\nأو ' : ''}✏️ تعديلها\nأو 🗑 حذفها\nأو 🚩 إبلاغنا\n${link ? `👈 ${link}` : `بالرد علينا، أو من الموقع: https://dalil-hama.majid.cfd`}\nشاكرين لكم تعاونكم وتفهمكم 🌿`;
 /** رابط شخصي لصاحب الرقم (migration 0012): رمز عشوائي 128 بت يوضع في الرسالة، ولا يُسجَّل في القاعدة إلا لحظة فتح واتساب */
 const ownerToken = () => b64u.enc(crypto.getRandomValues(new Uint8Array(16)));
 const ownerLink = (t) => `${location.origin}/r/#${t}`;
@@ -1194,12 +1201,14 @@ function excludePhones(phones, note = null) {
   const done = (async () => {
     try {
       const ids = await rpc('admin_exclude', { p_phones: list, p_note: note });
-      const [rows, ex] = await Promise.all([
+      const [rows, ex, reps] = await Promise.all([
         ids && ids.length ? rest(`listings?select=*&id=in.(${ids.join(',')})`) : [],
         rest('excluded_phones?select=*&order=created_at.desc'),
+        rest('reports?select=*&order=created_at.desc&limit=300').catch(() => null),
       ]);
       upsertMany(rows);
       setExcluded(ex);
+      if (reps) A.reports = reps;
       refreshStats();
       // إن فُتحت «الأرقام المستبعدة» قبل وصول ردّ الخادم: تُعاد لتظهر «إعادة الرقم لبطاقته» (سجلّها يأتي من الخادم)
       if (/^#excl/.test(location.hash) && !document.querySelector('.sheet, dialog[open]') && !document.activeElement?.closest('#ex-form')) route();
@@ -1363,6 +1372,43 @@ function viewInbox(el) {
   if (tab === 'rep') viewReports(box); else viewPending(box, 'req');
 }
 
+// ─────────────── «الرقم خطأ»: حذف الرقم أو تأكيده (من البلاغات أو من رابط الرسالة #rm) ───────────────
+
+/** kind: 'delete' يستبعد الرقم وحده (تبقى البطاقة إن بقي فيها رقم) ويغلق بلاغاته | 'ok' الرقم صحيح: يُعاد إظهاره ويُغلق بلاغه */
+async function phoneAction(phone, kind, listingId, after) {
+  const ph = normalizePhone(phone);
+  const r = listingId ? A.byId.get(listingId) : A.listings.find((x) => (x.phones || []).includes(ph));
+  const nm = r ? `«${esc(r.name)}»` : 'بطاقته';
+  const left = r ? (r.phones || []).filter((x) => x !== ph).length : 0;
+  const msg = kind === 'delete'
+    ? `حذف الرقم <b dir="ltr">${esc(formatPhone(ph))}</b> نهائياً من ${nm}؟ ${r ? (left ? `تبقى البطاقة (فيها ${fmtNum(left)} رقم آخر).` : 'لا رقم آخر فيها فتُحذف البطاقة.') : ''} يمكنك التراجع من «الأرقام المستبعدة».`
+    : `تأكيد أن الرقم <b dir="ltr">${esc(formatPhone(ph))}</b> صحيح؟ يُعاد إظهاره للزوار ويُغلق بلاغه ولا يُوقَف 30 يوماً.`;
+  if (!(await confirmBox(msg, { ok: kind === 'delete' ? 'حذف الرقم' : 'الرقم صحيح', danger: kind === 'delete' }))) return;
+  try {
+    if (kind === 'delete') {
+      const { done } = excludePhones([ph], r ? r.name : null);
+      await done;
+      if (r && !left) {
+        const [row] = await rest(`listings?id=eq.${r.id}`, { method: 'PATCH', body: { status: 'rejected' }, headers: rep });
+        if (row) upsertLocal(row);
+      }
+      toast(left || !r ? 'حُذف الرقم ✓' : 'حُذف الرقم والبطاقة ✓');
+    } else {
+      const ids = await rpc('admin_release_phone', { p_phone: ph, p_ok: true });
+      const [rows, reps] = await Promise.all([
+        ids && ids.length ? rest(`listings?select=*&id=in.(${ids.join(',')})`) : [],
+        rest('reports?select=*&order=created_at.desc&limit=300'),
+      ]);
+      upsertMany(rows);
+      A.reports = reps;
+      toast('أُكّد الرقم وأُعيد إظهاره ✓');
+    }
+    refreshStats();
+    renderNavCounts();
+    if (after) after();
+  } catch (err) { toast(`لم يكتمل: ${errMsg(err)}`, true); }
+}
+
 // ─────────────── البلاغات ───────────────
 
 function viewReports(el) {
@@ -1373,10 +1419,13 @@ function viewReports(el) {
     const l = r.listing_id && A.byId.get(r.listing_id);
     return `<div class="req">
       <div class="req-head"><span class="avatar" style="--hue:${l ? catHue(l.category_id) : 10}">${l ? catIcon(l.category_id) : '🚩'}</span>
-        <div style="flex:1;min-width:0"><h3>${esc(REPORT_KIND[r.kind] || r.kind)}${r.listing_name ? ` — ${esc(r.listing_name)}` : ''}</h3><div class="muted" style="font-size:13px">${timeAgo(r.created_at)}${l ? ` · ${phonesHtml(l)}` : ''}</div></div>${st(r.status, REPORT_STATUS)}</div>
+        <div style="flex:1;min-width:0"><h3>${esc(REPORT_KIND[r.kind] || r.kind)}${r.listing_name ? ` — ${esc(r.listing_name)}` : ''}</h3><div class="muted" style="font-size:13px">${timeAgo(r.created_at)}${l ? ` · ${phonesHtml(l)}` : ''}${r.held && r.status === 'open' ? ' · <b style="color:var(--danger)">⏸ الرقم موقوف عن الزوار</b>' : ''}</div></div>${st(r.status, REPORT_STATUS)}</div>
       ${r.details ? `<div style="white-space:pre-wrap;background:var(--surface-2);border-radius:12px;padding:10px 12px">${esc(r.details)}</div>` : ''}
       ${r.contact ? `<div class="muted" style="font-size:13.5px">للتواصل مع المُبلِّغ: <bdi dir="ltr">${esc(r.contact)}</bdi></div>` : ''}
       <div class="ops">
+        ${r.status === 'open' && r.phone && l && (l.phones || []).includes(r.phone) ? `<button class="btn btn-danger" data-rmphone="${r.id}">${I('trash', 'sm')}حذف الرقم <bdi dir="ltr">${esc(formatPhone(r.phone))}</bdi></button>` : ''}
+        ${r.status === 'open' && r.phone ? `<button class="btn btn-soft" data-okphone="${r.id}">${I('check', 'sm')}الرقم صحيح</button>` : ''}
+        ${r.contact && /^[+\d][\d\s+-]{6,}$/.test(r.contact) ? `<a class="btn btn-wa" href="${waHref(normalizePhone(r.contact), `السلام عليكم، وصلنا بلاغكم عن «${r.listing_name || 'نشاط'}» في دليل حماة 🌿`)}" target="_blank" rel="noopener">${I('wa', 'sm')}ردّ على المبلِّغ</a>` : ''}
         ${l ? `<button class="btn btn-soft" data-edit="${l.id}">${I('edit', 'sm')}تعديل النشاط</button>` : ''}
         ${l && l.status === 'approved' ? `<button class="btn btn-soft" data-hide="${l.id}" data-rid="${r.id}">${I('eye-off', 'sm')}إخفاء النشاط</button>` : ''}
         ${r.status === 'open' ? `<button class="btn btn-primary" data-res="${r.id}" data-to="resolved">${I('check', 'sm')}تمت المعالجة</button><button class="btn btn-ghost" data-res="${r.id}" data-to="dismissed">تجاهل</button>`
@@ -1388,6 +1437,13 @@ function viewReports(el) {
     if (t) { A.reportTab = t.dataset.tab; viewReports(el); return; }
     const res = e.target.closest('[data-res]');
     const hide = e.target.closest('[data-hide]');
+    const rmp = e.target.closest('[data-rmphone]');
+    const okp = e.target.closest('[data-okphone]');
+    if (rmp || okp) {
+      const rep0 = A.reports.find((x) => x.id === Number((rmp || okp).dataset.rmphone || (rmp || okp).dataset.okphone));
+      if (rep0 && rep0.phone) phoneAction(rep0.phone, rmp ? 'delete' : 'ok', rep0.listing_id, () => viewReports(el));
+      return;
+    }
     try {
       if (res) {
         const to = res.dataset.to;
@@ -2079,6 +2135,11 @@ function viewSettings(el) {
         <div class="field"><span>الصيدليات المناوبة</span><div id="duty-chosen"></div>
           <input class="input" id="duty-q" placeholder="ابحث باسم الصيدلية أو رقمها لإضافتها" autocomplete="off"><div id="duty-res"></div></div>
         <div class="toolbar"><button class="btn btn-primary" ${owner ? '' : 'disabled'}>حفظ</button><button class="btn btn-ghost" type="button" id="duty-off" ${owner ? '' : 'disabled'}>إيقاف العرض</button></div></form></div>
+    <div class="panel"><h2>${I('flag')}«الرقم خطأ» من رسالة الزائر</h2>
+      <form class="form" id="s-flag">
+        <p class="muted" style="margin:0">من يصله واتساب من الدليل بالخطأ يضغط «الرقم خطأ»: يصلك بلاغ فوراً في «البلاغات». عند التفعيل يُخفى الرقم عن الزوار مؤقتاً (حتى 3 أيام) إلى أن تحذفه أو تؤكده، ولا يُخفى رقم البطاقة الوحيد ولا رقم أكّدتَ صحته خلال 30 يوماً.</p>
+        <div class="toggles"><label><input type="checkbox" name="hold" ${(A.settings.flag || {}).hold === false ? '' : 'checked'}>إخفاء الرقم مؤقتاً عند طلب حذفه</label></div>
+        <button class="btn btn-primary" ${owner ? '' : 'disabled'}>حفظ</button></form></div>
     <div class="panel"><h2>${I('wa')}وسائل التواصل مع الدليل</h2>
       <form class="form-grid two" id="s-ct">
         <label class="field"><span>واتساب (دولي بدون +)</span><input class="input" name="whatsapp" dir="ltr" value="${esc(c.whatsapp || '')}"></label>
@@ -2099,6 +2160,7 @@ function viewSettings(el) {
       toast('تم الحفظ ✓ — يظهر للزوار خلال دقائق');
     } catch (err) { toast(errMsg(err), true); }
   };
+  $('#s-flag').onsubmit = (e) => { e.preventDefault(); saveSetting('flag', { hold: new FormData(e.target).has('hold') }); };
   $('#s-an').onsubmit = (e) => { e.preventDefault(); const fd = new FormData(e.target); saveSetting('announcement', { active: fd.has('active'), text: fd.get('text').trim(), link: fd.get('link').trim() }); };
   // اسم مستخدم من «@name» أو رابط (x.com/name · t.me/name) ← name
   const handle = (v) => String(v || '').trim().replace(/^https?:\/\/(www\.)?(x\.com|twitter\.com|t\.me)\//i, '').replace(/^@/, '').split(/[/?#]/)[0].trim();
