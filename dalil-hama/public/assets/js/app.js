@@ -1,9 +1,9 @@
 // دليل حماة — الواجهة العامة
 import {
   rpc, esc, formatPhone, isMobile, telHref, waHref, fmtNum, debounce, store, bigGet, bigSet,
-  distance, fmtDistance, mapHref, normalizePhone, safeUrl,
+  distance, fmtDistance, mapHref, normalizePhone, safeUrl, normalize, toLatinDigits,
 } from './core.js';
-import { SearchIndex, highlight } from './search.js';
+import { SearchIndex, highlight, stem } from './search.js';
 
 const ICONS = '/assets/img/icons.svg';
 const I = (name, cls = '') => `<svg class="ico ${cls}" aria-hidden="true"><use href="${ICONS}#${name}"/></svg>`;
@@ -11,12 +11,9 @@ const $ = (s, r = document) => r.querySelector(s);
 const CACHE_KEY = 'dh:data:v1';
 const FULL_SYNC_EVERY = 7 * 24 * 3600 * 1000;
 const PAGE = 36;
-/** رسالة واتساب الموحّدة لكل بطاقة (للجميع): الاسم والأرقام والعنوان والموقع ثم رابط البطاقة للتعديل أو الإبلاغ.
- *  رابط صاحب الرقم الخاص (تعديل/حذف) يُرسل من زر «إشعار صاحب الرقم» في الإدارة وحدها، فلا يُولَّد رمز لأي زائر. */
-const waMsg = (it) => {
-  const map = mapHref(it);
-  return `*السلام عليكم ورحمة الله وبركاته*🌺\n\nحصلنا على رقمكم من تطبيق دليل حماة «بين يديك»،\n\nباسم «${it.n}»\n${it.p && it.p.length ? `أرقامكم: ${it.p.join('، ')}\n` : ''}${it.d ? `عنوانكم: ${it.d}\n` : ''}${map ? `موقعكم: ${map}\n` : ''}\nفإن كان هنالك أي معلومة خاطئة، أو لا ترغبون بظهور رقمكم:\n🚩 أبلغونا عبر الرابط التالي وسنعدّلها أو نحذفها فوراً\n👈 ${location.origin}/?l=${it.i}&w=1\n\nشاكرين لكم تعاونكم وتفهمكم🌹`;
-};
+/** رسالة واتساب التي يبدأ بها الزائر محادثته مع النشاط: قصيرة وودّية يكمل الزائر كتابتها.
+ *  رسالة «إشعار صاحب الرقم» الكاملة (الأرقام والعنوان ورابط التعديل أو الحذف) تُرسل من لوحة الإدارة وحدها. */
+const waMsg = (it) => `السلام عليكم، وجدت «${it.n}» في دليل حماة 🌿\n`;
 
 const QUICK = [
   ['صيدليات', 'صيدليات'], ['عيادات وأطباء', 'أطباء'], ['مستشفيات', 'مشافي'], ['عيادات أسنان', 'أسنان'],
@@ -30,6 +27,8 @@ const REPORT_KINDS = [
 
 const state = {
   items: [], byId: new Map(), cats: [], catById: new Map(), areas: [], settings: {}, counts: new Map(), areaCounts: new Map(),
+  // ريف حماة: counts/areaCounts للمدينة وحدها، وruralCounts/ruralAreaCounts للريف، وall* للاثنين معاً
+  city: [], rural: [], hasRural: false, ruralNames: new Set(), ruralCounts: new Map(), ruralAreaCounts: new Map(), allCounts: new Map(), allAreaCounts: new Map(),
   index: new SearchIndex(), favs: new Set(store.get('dh:favs', [])), recent: store.get('dh:recent', []),
   geo: store.get('dh:geo', null), list: [], terms: [], shown: 0, viewKey: '', loaded: false,
   installEvt: null, viewed: new Set(), lastLogged: '',
@@ -54,12 +53,24 @@ function applyData(data) {
   state.items = data.items;
   state.byId = new Map(data.items.map((it) => [it.i, it]));
   state.index.setData(state.items, state.cats, state.areas);
+  state.ruralNames = new Set(state.areas.filter((a) => a.r).map((a) => a.n));
   state.counts = new Map();
   state.areaCounts = new Map();
+  state.ruralCounts = new Map();
+  state.ruralAreaCounts = new Map();
+  state.allCounts = new Map();
+  state.allAreaCounts = new Map();
+  state.city = [];
+  state.rural = [];
+  const bump = (m, k) => m.set(k, (m.get(k) || 0) + 1);
   for (const it of state.items) {
-    state.counts.set(it.c, (state.counts.get(it.c) || 0) + 1);
-    if (it.a) state.areaCounts.set(it.a, (state.areaCounts.get(it.a) || 0) + 1);
+    const r = !!(it.a && state.ruralNames.has(it.a));
+    (r ? state.rural : state.city).push(it);
+    bump(r ? state.ruralCounts : state.counts, it.c);
+    bump(state.allCounts, it.c);
+    if (it.a) { bump(r ? state.ruralAreaCounts : state.areaCounts, it.a); bump(state.allAreaCounts, it.a); }
   }
+  state.hasRural = state.rural.length > 0;
   const keepView = state.loaded && window.scrollY > 300 && (params().q || params().c || params().a || params().v);
   state.loaded = true;
   if (!keepView) state.viewKey = '';
@@ -92,6 +103,7 @@ async function loadData() {
       for (const id of res.removed) map.delete(id);
       next = { ...res, items: [...map.values()].sort((a, b) => a.i - b.i), fullAt: cached.fullAt };
       if (!res.items.length && !res.removed.length && JSON.stringify(res.cats) === JSON.stringify(cached.cats)
+        && JSON.stringify(res.areas) === JSON.stringify(cached.areas)
         && JSON.stringify(res.settings) === JSON.stringify(cached.settings)) {
         bigSet(CACHE_KEY, { ...strip(cached), now: res.now });
         return;
@@ -199,6 +211,46 @@ window.addEventListener('popstate', () => {
 const catHue = (c) => (c ? (c.o * 4.7 + c.i * 31) % 360 : 170);
 const catOf = (it) => state.catById.get(it.c);
 
+// نطاق القائمة: المدينة (البحث العادي) | ريف حماة | الكل (الأقرب إليّ)
+const scopeOf = (mode) => (mode === 'rural' ? 'rural' : mode === 'search' ? 'city' : 'all');
+const catCountsOf = (mode) => (mode === 'rural' ? state.ruralCounts : mode === 'search' ? state.counts : state.allCounts);
+const areaCountsOf = (mode) => (mode === 'rural' ? state.ruralAreaCounts : mode === 'search' ? state.areaCounts : state.allAreaCounts);
+const catHref = (id, rural) => `/?${rural ? 'v=rural&' : ''}c=${id}`;
+const areaHref = (name) => `/?${state.ruralNames.has(name) ? 'v=rural&' : ''}a=${encodeURIComponent(name)}`;
+
+function sosHtml(list, inList = false) {
+  return `<div class="emergency${inList ? ' in-list' : ''}${list.length < 3 ? ' few' : ''}" style="grid-template-columns:repeat(${Math.min(list.length, 3)},1fr)">${list.map((e) => `<a class="sos" href="tel:${esc(e.number)}" data-act="sos"><span class="em" aria-hidden="true">${esc(e.icon || '☎️')}</span><span><b>${esc(e.name)}</b><bdi class="num">${esc(e.number)}</bdi></span></a>`).join('')}</div>`;
+}
+
+// البحث عن «إسعاف» أو «شرطة» أو «حريق» أو «طوارئ» أو رقم الطوارئ نفسه يعرض أرقام الطوارئ فوق النتائج
+const SOS_WORDS = [
+  [['اسعاف', 'مسعف'], 'الإسعاف'],
+  [['شرطة', 'نجدة', 'بوليس', 'شرطي'], 'الشرطة'],
+  [['اطفاء', 'حريق', 'مطافي', 'دفاع'], 'الإطفاء'],
+];
+const SOS_ALL = ['طوارئ', 'طوارىء', 'طواريء'];
+function emergencyFor(q) {
+  const em = state.settings.emergency || [];
+  if (!em.length || !q) return [];
+  const toks = normalize(q).split(' ').filter(Boolean);
+  const digits = toLatinDigits(q).replace(/\D/g, '');
+  const key = (s) => stem(normalize(s));
+  const wanted = new Set();
+  let all = false;
+  for (const t of toks) {
+    if (SOS_ALL.map(normalize).includes(t)) all = true;
+    for (const [words, target] of SOS_WORDS) if (words.map(normalize).includes(t)) wanted.add(key(target));
+    wanted.add(stem(t));
+  }
+  return em.filter((e) => all || wanted.has(key(e.name)) || (digits.length >= 3 && digits === String(e.number).replace(/\D/g, '')));
+}
+
+function ruralCard() {
+  const names = state.areas.filter((a) => a.r && state.ruralAreaCounts.get(a.n))
+    .sort((a, b) => state.ruralAreaCounts.get(b.n) - state.ruralAreaCounts.get(a.n)).slice(0, 4).map((a) => a.n).join('، ');
+  return `<a class="portal" href="/?v=rural" data-nav="rural"><span class="em" aria-hidden="true">🌾</span><span class="txt"><b>ريف حماة</b><small>${esc(names)} وغيرها · ${fmtNum(state.rural.length)} نشاطاً</small></span>${I('chev')}</a>`;
+}
+
 function waNumber(it) {
   if (it.nw) return '';
   if (it.w) return normalizePhone(it.w);
@@ -247,7 +299,13 @@ function setHeroCompact(compact) {
 function render(p) {
   if (!state.loaded) return;
   const view = $('#view');
-  if (p.v === 'cats') { setHeroCompact(true); view.innerHTML = renderCats(); }
+  // ريف حماة: v=rural، أو رابط حيّ لبلدة ريفية (?a=سلمية) يُفتح في بوابة الريف
+  const rural = state.hasRural && (p.v === 'rural' || (!p.v && p.a && state.ruralNames.has(p.a)));
+  $('#status').textContent = '';
+  $('#q').placeholder = rural ? 'ابحث في ريف حماة…' : 'ابحث باسم، مهنة، حي أو رقم…';
+  if (rural && !(p.q || p.c || p.a)) { setHeroCompact(true); view.innerHTML = renderRural(); }
+  else if (rural) { setHeroCompact(true); renderList(p, 'rural'); }
+  else if (p.v === 'cats') { setHeroCompact(true); view.innerHTML = renderCats(); }
   else if (p.v === 'favs') { setHeroCompact(true); renderList(p, 'favs'); }
   else if (p.v === 'near') { setHeroCompact(true); renderList(p, 'near'); }
   else if (p.q || p.c || p.a) { setHeroCompact(true); renderList(p, 'search'); }
@@ -258,10 +316,14 @@ function render(p) {
 
 function renderChrome() {
   const total = state.items.length;
-  $('#hero-stats').innerHTML = `<span><b>${fmtNum(total)}</b> رقماً وعنواناً</span><span><b>${fmtNum(state.cats.length)}</b> تصنيفاً</span><span>حماة حصراً</span>`;
+  const nCats = state.cats.filter((c) => state.allCounts.get(c.i)).length;
+  $('#hero-stats').innerHTML = `<span><b>${fmtNum(total)}</b> رقماً وعنواناً</span><span><b>${fmtNum(nCats)}</b> تصنيفاً</span><span>${state.hasRural ? 'حماة وريفها' : 'حماة حصراً'}</span>`;
   const byName = new Map(state.cats.map((c) => [c.n, c]));
   $('#quick').innerHTML = QUICK.map(([n, label]) => byName.get(n)).filter(Boolean)
-    .map((c) => `<a class="chip-hero" href="/?c=${c.i}" data-cat="${c.i}"><span aria-hidden="true">${c.ic}</span>${esc(QUICK.find((x) => x[0] === c.n)[1])}</a>`).join('');
+    .map((c) => `<a class="chip-hero" href="/?c=${c.i}" data-cat="${c.i}"><span aria-hidden="true">${c.ic}</span>${esc(QUICK.find((x) => x[0] === c.n)[1])}</a>`).join('')
+    + (state.hasRural ? `<a class="chip-hero" href="/?v=rural" data-nav="rural"><span aria-hidden="true">🌾</span>ريف حماة</a>` : '');
+  $('#nav-rural').hidden = !state.hasRural;
+  $('#foot-rural').hidden = !state.hasRural;
   const an = state.settings.announcement;
   $('#announce').innerHTML = an && an.active && an.text
     ? `<div class="announce">${I('megaphone')}<div>${esc(an.text)}${safeUrl(an.link) ? ` <a class="lnk" href="${esc(safeUrl(an.link))}" target="_blank" rel="noopener" style="color:var(--brand);font-weight:700">التفاصيل</a>` : ''}</div></div>` : '';
@@ -292,20 +354,19 @@ function catTile(c) {
 function renderHome() {
   const emergency = state.settings.emergency || [];
   const cats = [...state.cats].filter((c) => state.counts.get(c.i)).sort((a, b) => (state.counts.get(b.i) || 0) - (state.counts.get(a.i) || 0));
-  const featured = state.items.filter((it) => it.f).slice(0, 9);
-  const popular = state.items.filter((it) => it.k).sort((a, b) => b.k - a.k).slice(0, 6);
-  const newest = [...state.items].sort((a, b) => b.i - a.i).slice(0, 6);
+  const featured = state.city.filter((it) => it.f).slice(0, 9);
+  const popular = state.city.filter((it) => it.k).sort((a, b) => b.k - a.k).slice(0, 6);
+  const newest = [...state.city].sort((a, b) => b.i - a.i).slice(0, 6);
   const recent = state.recent.map((id) => state.byId.get(id)).filter(Boolean).slice(0, 6);
   const areas = state.areas.filter((a) => state.areaCounts.get(a.n)).sort((a, b) => state.areaCounts.get(b.n) - state.areaCounts.get(a.n));
   let h = '';
-  if (emergency.length) {
-    h += `<div class="emergency">${emergency.map((e) => `<a class="sos" href="tel:${esc(e.number)}" data-act="sos"><span class="em" aria-hidden="true">${esc(e.icon || '☎️')}</span><span><b>${esc(e.name)}</b><bdi class="num">${esc(e.number)}</bdi></span></a>`).join('')}</div>`;
-  }
+  if (emergency.length) h += sosHtml(emergency);
+  if (state.hasRural) h += ruralCard();
   if (recent.length) h += `<section class="section">${sectionHead('شاهدتها مؤخراً')}<div class="rail">${recent.map((it) => card(it)).join('')}</div></section>`;
   h += `<section class="section">${sectionHead('تصفّح حسب التصنيف', 'اختر ما تحتاجه وابدأ الاتصال مباشرة', `<a class="more-link" href="/?v=cats" data-nav="cats">الكل ${I('chev', 'sm')}</a>`)}
     <div class="cat-grid">${cats.slice(0, 12).map(catTile).join('')}</div></section>`;
-  if (featured.length) h += `<section class="section">${sectionHead('مميّزون في حماة', 'أنشطة موثّقة ننصح بها')}<div class="rail">${featured.map((it) => card(it)).join('')}</div></section>`;
-  if (popular.length) h += `<section class="section">${sectionHead('الأكثر تواصلاً', 'الأرقام التي يتصل بها الناس أكثر هذه الفترة')}<div class="rail">${popular.map((it) => card(it)).join('')}</div></section>`;
+  if (featured.length >= 3) h += `<section class="section">${sectionHead('مميّزون في حماة', 'أنشطة موثّقة ننصح بها')}<div class="rail">${featured.map((it) => card(it)).join('')}</div></section>`;
+  if (popular.length >= 3) h += `<section class="section">${sectionHead('الأكثر تواصلاً', 'الأرقام التي يتصل بها الناس أكثر هذه الفترة')}<div class="rail">${popular.map((it) => card(it)).join('')}</div></section>`;
   h += `<section class="section">${sectionHead('أقرب الخدمات إليك', 'حدّد موقعك لنرتب لك الأماكن حسب المسافة')}
     <a class="btn btn-soft btn-lg btn-block" href="/?v=near" data-nav="near">${I('locate')}اعرض الأقرب إليّ الآن</a></section>`;
   if (areas.length) {
@@ -319,37 +380,57 @@ function renderHome() {
   return h;
 }
 
+function renderRural() {
+  const byCount = (m, key) => (a, b) => (m.get(key(b)) || 0) - (m.get(key(a)) || 0);
+  const towns = state.areas.filter((a) => a.r && state.ruralAreaCounts.get(a.n)).sort(byCount(state.ruralAreaCounts, (a) => a.n));
+  const cats = state.cats.filter((c) => state.ruralCounts.get(c.i)).sort(byCount(state.ruralCounts, (c) => c.i));
+  const townTile = (a, i) => `<a class="cat" href="/?v=rural&a=${encodeURIComponent(a.n)}" style="--hue:${(i * 47 + 150) % 360}"><span class="em" aria-hidden="true">🏘️</span><b>${esc(a.n)}</b><small>${fmtNum(state.ruralAreaCounts.get(a.n))} نشاط</small></a>`;
+  const catTileR = (c) => `<a class="cat" href="/?v=rural&c=${c.i}" data-cat="${c.i}" style="--hue:${catHue(c)}"><span class="em" aria-hidden="true">${c.ic}</span><b>${esc(c.n)}</b><small>${fmtNum(state.ruralCounts.get(c.i))} نشاط</small></a>`;
+  return `<div class="results-head"><div class="results-title"><a class="back" href="/" data-act="back" aria-label="رجوع">${I('back')}</a><h2>🌾 ريف حماة</h2><span class="count">${fmtNum(state.rural.length)} نشاطاً</span></div></div>
+    <p class="notice" style="margin-top:8px">أرقام وعناوين البلدات والقرى خارج مدينة حماة. استعمل شريط البحث للبحث داخل الريف وحده.</p>
+    <section class="section">${sectionHead('تصفّح حسب البلدة')}<div class="cat-grid">${towns.map(townTile).join('')}</div></section>
+    <section class="section">${sectionHead('تصفّح حسب التصنيف')}<div class="cat-grid">${cats.map(catTileR).join('')}</div></section>
+    <section class="section"><div class="announce" style="background:var(--brand-soft);border-color:transparent;align-items:center;flex-wrap:wrap">
+      <div style="flex:1;min-width:220px"><b style="font-size:17px">هل لديك نشاط في ريف حماة؟</b><br><span style="color:var(--ink-2)">أضفه مجاناً واختر بلدتك من القائمة.</span></div>
+      <a class="btn btn-primary" href="#add">${I('plus', 'sm')}أضف نشاطك</a></div></section>`;
+}
+
 function renderCats() {
   const cats = [...state.cats].filter((c) => state.counts.get(c.i));
   const areas = state.areas.filter((a) => state.areaCounts.get(a.n));
   return `<div class="results-head"><div class="results-title"><a class="back" href="/" data-act="back" aria-label="رجوع">${I('back')}</a><h2>كل التصنيفات</h2><span class="count">${fmtNum(cats.length)} تصنيفاً</span></div></div>
+    ${state.hasRural ? ruralCard() : ''}
     <div class="cat-grid" style="margin-top:8px">${cats.map(catTile).join('')}</div>
     <section class="section">${sectionHead('الأحياء')}<div class="filters" style="flex-wrap:wrap;overflow:visible;margin:0;padding:0">${areas.map((a) => `<a class="pill" href="/?a=${encodeURIComponent(a.n)}">${esc(a.n)} <small style="opacity:.6">${fmtNum(state.areaCounts.get(a.n))}</small></a>`).join('')}</div></section>`;
 }
 
 function renderList(p, mode) {
   const view = $('#view');
+  const rural = mode === 'rural';
   let title = '';
   let list;
   let extra = '';
-  let res = { results: [], cats: [], terms: [] };
+  let res = { results: [], cats: [], areas: [], terms: [] };
   if (mode === 'favs') {
     title = 'مفضّلتي';
     list = [...state.favs].map((id) => state.byId.get(id)).filter(Boolean);
     if (p.c) list = list.filter((it) => it.c === p.c);
   } else {
-    res = state.index.search(p.q, { cat: p.c, area: p.a });
+    res = state.index.search(p.q, { cat: p.c, area: p.a, scope: scopeOf(mode) });
     list = res.results;
+    const pre = rural ? 'ريف حماة · ' : '';
     if (mode === 'near') {
       title = 'الأقرب إليك';
       list = list.filter((it) => it.y);
     } else if (p.q) {
-      title = `نتائج «${esc(p.q)}»`;
+      title = `${pre}نتائج «${esc(p.q)}»`;
     } else if (p.c) {
       const c = state.catById.get(p.c);
-      title = c ? `${c.ic} ${esc(c.n)}` : 'النتائج';
+      title = `${pre}${c ? `${c.ic} ${esc(c.n)}` : 'النتائج'}`;
     } else if (p.a) {
-      title = `حي ${esc(p.a)}`;
+      title = rural ? `ريف حماة · ${esc(p.a)}` : `حي ${esc(p.a)}`;
+    } else if (rural) {
+      title = 'ريف حماة';
     }
   }
   const sort = mode === 'near' ? 'near' : p.s;
@@ -359,22 +440,25 @@ function renderList(p, mode) {
     list = [...list].sort((a, b) => a.n.localeCompare(b.n, 'ar'));
   } else if (sort === 'new') {
     list = [...list].sort((a, b) => b.i - a.i);
-  } else if (!p.q && mode === 'search') {
+  } else if (!p.q && (mode === 'search' || rural)) {
     list = [...list].sort((a, b) => (b.f || 0) - (a.f || 0) || (b.k || 0) - (a.k || 0) || (b.p ? 1 : 0) - (a.p ? 1 : 0) || a.n.localeCompare(b.n, 'ar'));
   }
   state.list = list;
   state.terms = res.terms || [];
   state.shown = 0;
+  $('#status').textContent = `${fmtNum(list.length)} نتيجة`;
 
-  const catOpts = state.cats.filter((c) => state.counts.get(c.i))
+  const cc = catCountsOf(mode);
+  const ac = areaCountsOf(mode);
+  const catOpts = state.cats.filter((c) => cc.get(c.i))
     .map((c) => `<option value="${c.i}"${p.c === c.i ? ' selected' : ''}>${c.ic} ${esc(c.n)}</option>`).join('');
-  const areaOpts = state.areas.filter((a) => state.areaCounts.get(a.n))
+  const areaOpts = state.areas.filter((a) => ac.get(a.n) && (mode === 'search' ? !a.r : rural ? a.r : true))
     .map((a) => `<option value="${esc(a.n)}"${p.a === a.n ? ' selected' : ''}>${esc(a.n)}</option>`).join('');
   const filters = `<div class="filters" role="group" aria-label="تصفية">
       ${mode !== 'favs' ? `<button class="pill${p.m ? ' on' : ''}" type="button" data-act="toggle-map" aria-pressed="${p.m}">${I(p.m ? 'list' : 'map', 'sm')}${p.m ? 'القائمة' : 'الخريطة'}</button>` : ''}
       <select class="pill" data-filter="c" aria-label="التصنيف"><option value="">كل التصنيفات</option>${catOpts}</select>
-      ${mode !== 'favs' ? `<select class="pill" data-filter="a" aria-label="الحي"><option value="">كل الأحياء</option>${areaOpts}</select>` : ''}
-      ${mode === 'search' ? `<select class="pill" data-filter="s" aria-label="الترتيب">
+      ${mode !== 'favs' ? `<select class="pill" data-filter="a" aria-label="${rural ? 'البلدة' : 'الحي'}"><option value="">${rural ? 'كل البلدات' : 'كل الأحياء'}</option>${areaOpts}</select>` : ''}
+      ${mode === 'search' || rural ? `<select class="pill" data-filter="s" aria-label="الترتيب">
         <option value="">${p.q ? 'الأنسب' : 'الأبرز'}</option><option value="near"${p.s === 'near' ? ' selected' : ''}>الأقرب</option>
         <option value="name"${p.s === 'name' ? ' selected' : ''}>أبجدياً</option><option value="new"${p.s === 'new' ? ' selected' : ''}>الأحدث</option></select>` : ''}
     </div>`;
@@ -386,11 +470,29 @@ function renderList(p, mode) {
     extra = `<div class="geo-bar"><span>${I('locate', 'sm')}المسافات من موقعك ${geoStale() ? 'السابق' : 'الحالي'}</span><button class="btn btn-soft" type="button" data-act="locate">${I('refresh', 'sm')}تحديث موقعي</button></div>`;
     if (geoStale() && !state.geoTried) { state.geoTried = true; locate(true); }
   }
-  if (res.cats && res.cats.length && p.q && !p.c) {
-    extra += `<div class="cat-suggest">${res.cats.map((id) => state.catById.get(id)).filter((c) => c && state.counts.get(c.i)).map((c) => `<a href="/?c=${c.i}">${c.ic} كل ${esc(c.n)} <small>(${fmtNum(state.counts.get(c.i) || 0)})</small></a>`).join('')}</div>`;
+  // اقتراحات: تصنيفات وأحياء تطابق كلمة البحث، وعدد النتائج في ريف حماة إن وُجد
+  const sug = [];
+  if (p.q && !p.c) {
+    for (const id of res.cats || []) {
+      const c = state.catById.get(id);
+      if (c && cc.get(c.i)) sug.push(`<a href="${catHref(c.i, rural)}">${c.ic} كل ${esc(c.n)} <small>(${fmtNum(cc.get(c.i))})</small></a>`);
+    }
   }
+  if (p.q && !p.a) {
+    for (const n of res.areas || []) {
+      const k = state.allAreaCounts.get(n);
+      if (k) sug.push(`<a href="${areaHref(n)}">📍 كل ${state.ruralNames.has(n) ? 'أنشطة ' : 'حي '}${esc(n)} <small>(${fmtNum(k)})</small></a>`);
+    }
+  }
+  if (mode === 'search' && p.q && state.hasRural && !res.phone) {
+    const rr = state.index.search(p.q, { cat: p.c, scope: 'rural', noFuzzy: true }).results.length;
+    if (rr) sug.push(`<a href="/?v=rural&q=${encodeURIComponent(p.q)}${p.c ? `&c=${p.c}` : ''}">🌾 ${fmtNum(rr)} نتيجة في ريف حماة</a>`);
+  }
+  if (sug.length) extra += `<div class="cat-suggest">${sug.join('')}</div>`;
   if (res.fuzzy && list.length) extra += `<p class="notice">لم نجد تطابقاً تاماً، إليك أقرب النتائج:</p>`;
   if (res.phone) extra += `<p class="notice">نتائج البحث بالرقم:</p>`;
+  const sos = p.q ? emergencyFor(p.q) : [];
+  if (sos.length) extra = sosHtml(sos, true) + extra;
 
   view.innerHTML = `<div class="results-head">
       <div class="results-title"><a class="back" href="/" data-act="back" aria-label="رجوع">${I('back')}</a><h2>${title}</h2><span class="count">${fmtNum(list.length)} نتيجة</span></div>
@@ -399,7 +501,7 @@ function renderList(p, mode) {
     ${extra}
     ${p.m && mode !== 'favs' ? '<div class="map-box" id="map"></div>' : '<div class="list" id="list"></div><div class="sentinel" id="sentinel"></div>'}`;
 
-  if (p.q && !res.phone) scheduleSearchLog(p.q, mode === 'search' && !p.c && !p.a ? list.length : state.index.search(p.q).results.length);
+  if (p.q && !res.phone) scheduleSearchLog(p.q, () => state.index.search(p.q).results.length);
   if (!list.length && !(mode === 'near' && !state.geo)) {
     ($('#list') || $('#map')).outerHTML = emptyState(mode, p);
     return;
@@ -432,11 +534,12 @@ const io = new IntersectionObserver((entries) => {
   if (entries.some((e) => e.isIntersecting) && state.shown < state.list.length) appendPage();
 }, { rootMargin: '800px 0px' });
 
+// n دالة: العدد (في كل الأنشطة لا في نطاق القائمة) يُحسب عند الإرسال فقط لا مع كل حرف
 const scheduleSearchLog = debounce((q, n) => {
   const t = (q || '').trim();
   if (t.length < 2 || t === state.lastLogged || t !== params().q) return;
   state.lastLogged = t;
-  rpc('log_search', { q: t, results: n }).catch(() => {});
+  rpc('log_search', { q: t, results: n() }).catch(() => {});
 }, 1800);
 
 // ─────────────── الخريطة (تُحمَّل عند الطلب) ───────────────
@@ -593,6 +696,7 @@ function openItem(id) {
   const wa = waNumber(it);
   const map = mapHref(it);
   const d = distOf(it);
+  const isRural = !!(it.a && state.ruralNames.has(it.a));
   const phones = (it.p || []).map((p, i) => `<div class="phone-row">
       <div class="num"><bdi dir="ltr">${esc(formatPhone(p))}</bdi><span class="kind">${isMobile(p) ? 'جوال' : 'أرضي'}${i === 0 ? ' · الرقم الأساسي' : ''}</span></div>
       <button class="icon-btn" type="button" data-act="copy" data-val="${esc(p)}" aria-label="نسخ الرقم">${I('copy', 'sm')}</button>
@@ -610,14 +714,14 @@ function openItem(id) {
     <div class="detail-hero" style="--hue:${catHue(cat)}">
       <div class="avatar" aria-hidden="true">${cat ? cat.ic : '📍'}</div>
       <div style="min-width:0"><h3>${esc(it.n)}${it.v ? `<span class="badge" title="موثّق">${I('verified')}</span>` : ''}</h3>
-        <div class="tags">${cat ? `<a class="tag brand" href="/?c=${cat.i}" data-cat="${cat.i}">${esc(cat.n)}</a>` : ''}${it.a ? `<a class="tag" href="/?a=${encodeURIComponent(it.a)}">${I('pin', 'sm')}${esc(it.a)}</a>` : ''}${it.f ? `<span class="tag gold">${I('star', 'sm')}مميّز</span>` : ''}${(it.t || []).map((t) => `<span class="tag">${esc(t)}</span>`).join('')}</div>
+        <div class="tags">${cat ? `<a class="tag brand" href="${catHref(cat.i, isRural)}" data-cat="${cat.i}">${esc(cat.n)}</a>` : ''}${it.a ? `<a class="tag" href="${areaHref(it.a)}">${I('pin', 'sm')}${esc(it.a)}</a>` : ''}${it.f ? `<span class="tag gold">${I('star', 'sm')}مميّز</span>` : ''}${(it.t || []).map((t) => `<span class="tag">${esc(t)}</span>`).join('')}</div>
       </div>
     </div>
     <div class="block"><p class="block-title">أرقام التواصل</p>
       ${phones || `<div class="no-phone" style="min-height:52px"><span>لا يوجد رقم لهذا النشاط بعد</span><button type="button" data-act="addphone">تعرفه؟ أضفه</button></div>`}${waExtra}
     </div>
     ${it.d || it.a || map ? `<div class="block"><p class="block-title">العنوان والموقع</p>
-      <div class="info-row">${I('pin')}<div class="grow">${esc(it.d || (it.a ? `حماة، ${it.a}` : 'حماة'))}${d !== null ? `<div class="meta"><span class="dist">يبعد عنك ${fmtDistance(d)}</span></div>` : ''}</div>
+      <div class="info-row">${I('pin')}<div class="grow">${esc(it.d || (it.a ? `${isRural ? 'ريف حماة' : 'حماة'}، ${it.a}` : 'الموقع على الخريطة'))}${d !== null ? `<div class="meta"><span class="dist">يبعد عنك ${fmtDistance(d)}</span></div>` : ''}</div>
       ${map ? `<a class="btn btn-soft" href="${esc(map)}" target="_blank" rel="noopener" data-act="map">${I('map', 'sm')}الخريطة</a>` : ''}</div></div>` : ''}
     ${safeUrl(it.s) ? `<div class="block"><div class="info-row">${I('globe')}<div class="grow"><a class="lnk" href="${esc(safeUrl(it.s))}" target="_blank" rel="noopener" dir="ltr">${esc(it.s.replace(/^https?:\/\//, '').replace(/\/$/, ''))}</a></div></div></div>` : ''}
     ${it.e ? `<div class="block"><p class="block-title">نبذة</p><div class="info-row">${I('info')}<div class="grow">${esc(it.e)}</div></div></div>` : ''}
@@ -639,8 +743,11 @@ function openItem(id) {
 
 // إضافة نشاط
 function openAdd() {
-  const catOpts = state.cats.map((c) => `<option value="${c.i}">${c.ic} ${esc(c.n)}</option>`).join('');
-  const areaOpts = state.areas.map((a) => `<option>${esc(a.n)}</option>`).join('');
+  // التصنيفات الفارغة (مكرّرات قديمة) لا تُعرض: نشاط يُنشر فيها لا يراه أحد
+  const catOpts = state.cats.filter((c) => state.allCounts.get(c.i)).map((c) => `<option value="${c.i}">${c.ic} ${esc(c.n)}</option>`).join('');
+  const ruralAreas = state.areas.filter((a) => a.r);
+  const areaOpts = state.areas.filter((a) => !a.r).map((a) => `<option>${esc(a.n)}</option>`).join('')
+    + (ruralAreas.length ? `<optgroup label="ريف حماة">${ruralAreas.map((a) => `<option>${esc(a.n)}</option>`).join('')}</optgroup>` : '');
   const body = `<form class="form" id="add-form" novalidate>
     <p style="margin:0;color:var(--ink-2)">أضف نشاطك أو أي نشاط تعرفه في حماة مجاناً. نراجع الطلب ونتحقق من الرقم قبل النشر.</p>
     <label class="field"><span>اسم النشاط أو صاحب المهنة <i>*</i></span><input class="input" name="name" required minlength="2" maxlength="160" placeholder="مثال: صيدلية الشفاء"></label>

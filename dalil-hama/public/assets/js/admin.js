@@ -1823,15 +1823,17 @@ function viewCats(el) {
 function viewAreas(el) {
   const counts = new Map();
   for (const r of A.listings) if (r.area) counts.set(r.area, (counts.get(r.area) || 0) + 1);
-  el.innerHTML = `<div class="panel" style="margin-top:0"><h2>${I('plus')}حي جديد</h2><form class="toolbar" id="area-new" style="margin:0"><input class="input grow" name="name" placeholder="اسم الحي" required><button class="btn btn-primary">إضافة</button></form></div>
-    <div class="panel"><h2>${I('pin')}الأحياء (${fmtNum(A.areas.length)})</h2><div class="tbl-wrap"><table class="tbl"><thead><tr><th>الاسم</th><th>ترتيب</th><th>عدد</th><th></th></tr></thead><tbody>
-    ${A.areas.map((a) => `<tr data-aid="${a.id}"><td><input class="input" name="name" value="${esc(a.name)}"></td><td><input class="input" name="sort" type="number" value="${a.sort}" style="width:80px"></td><td>${fmtNum(counts.get(a.name) || 0)}</td>
+  const ruralCol = A.areas.length > 0 && 'rural' in A.areas[0]; // العمود من migration 0017
+  el.innerHTML = `<div class="panel" style="margin-top:0"><h2>${I('plus')}حي جديد</h2><form class="toolbar" id="area-new" style="margin:0"><input class="input grow" name="name" placeholder="اسم الحي أو البلدة" required>${ruralCol ? '<label style="display:flex;align-items:center;gap:6px;white-space:nowrap"><input type="checkbox" name="rural"> من ريف حماة</label>' : ''}<button class="btn btn-primary">إضافة</button></form></div>
+    <div class="panel"><h2>${I('pin')}الأحياء (${fmtNum(A.areas.length)})</h2><div class="tbl-wrap"><table class="tbl"><thead><tr><th>الاسم</th>${ruralCol ? '<th>ريف</th>' : ''}<th>ترتيب</th><th>عدد</th><th></th></tr></thead><tbody>
+    ${A.areas.map((a) => `<tr data-aid="${a.id}"><td><input class="input" name="name" value="${esc(a.name)}"></td>${ruralCol ? `<td><input type="checkbox" name="rural" aria-label="من ريف حماة"${a.rural ? ' checked' : ''}></td>` : ''}<td><input class="input" name="sort" type="number" value="${a.sort}" style="width:80px"></td><td>${fmtNum(counts.get(a.name) || 0)}</td>
       <td style="white-space:nowrap"><button class="btn btn-soft" data-save-area="${a.id}">حفظ</button> <button class="icon-btn" data-del-area="${a.id}" aria-label="حذف">${I('trash', 'sm')}</button></td></tr>`).join('')}
     </tbody></table></div></div>`;
   $('#area-new').onsubmit = async (e) => {
     e.preventDefault();
     try {
-      const [a] = await rest('areas', { method: 'POST', body: { name: new FormData(e.target).get('name').trim(), sort: (A.areas.at(-1)?.sort || 0) + 10 }, headers: rep });
+      const fd = new FormData(e.target);
+      const [a] = await rest('areas', { method: 'POST', body: { name: fd.get('name').trim(), ...(ruralCol ? { rural: !!fd.get('rural') } : {}), sort: (A.areas.at(-1)?.sort || 0) + 10 }, headers: rep });
       A.areas.push(a);
       toast('تمت الإضافة ✓');
       if (onView('areas')) viewAreas(el);
@@ -1845,7 +1847,7 @@ function viewAreas(el) {
         const tr = sv.closest('tr');
         const old = A.areas.find((a) => a.id === Number(sv.dataset.saveArea));
         const name = tr.querySelector('[name=name]').value.trim();
-        const [a] = await rest(`areas?id=eq.${old.id}`, { method: 'PATCH', body: { name, sort: Number(tr.querySelector('[name=sort]').value) || 100 }, headers: rep });
+        const [a] = await rest(`areas?id=eq.${old.id}`, { method: 'PATCH', body: { name, ...(ruralCol ? { rural: tr.querySelector('[name=rural]').checked } : {}), sort: Number(tr.querySelector('[name=sort]').value) || 100 }, headers: rep });
         if (old.name !== name) {
           await rest(`listings?area=eq.${encodeURIComponent(old.name)}`, { method: 'PATCH', body: { area: name } });
           A.listings.forEach((r) => { if (r.area === old.name) r.area = name; });
