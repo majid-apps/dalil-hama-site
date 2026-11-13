@@ -689,7 +689,14 @@ $(api_routes)
 			expression {err.status_code} == 404
 			path_regexp ^/[^.]*$
 		}
-		redir @missing_page / 302
+		# صفحة 404 حقيقية بالدليل (رمز 404 صحيح، لا تحويل إلى الرئيسية): محركات البحث تعدّ التحويل «soft 404»
+		handle @missing_page {
+			root * $BASE/current
+			rewrite * /404.html
+			file_server {
+				status 404
+			}
+		}
 		respond "{err.status_code} {err.status_text}"
 	}
 }

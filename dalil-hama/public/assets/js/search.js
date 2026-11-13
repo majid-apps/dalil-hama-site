@@ -6,6 +6,9 @@ const PREFIXES = ['وال', 'بال', 'فال', 'كال', 'لل', 'ال'];
 // كلمات تصف مكاناً لا نوع نشاط: «سوق الحدادين» يبحث عن المحلات الواقعة فيه
 const PLACE = new Set(['سوق', 'شارع', 'دوار', 'ساحه', 'طريق', 'جسر', 'باب', 'مدخل']);
 
+// كلمات يتغيّر معناها لو حُذفت تاؤها المربوطة: «جامعة» ليست «جامع» (مسجد)، و«مكتبة» ليست «مكتب»، و«مدرسة» ليست «مدرس» (معلّم)
+const KEEP_TA = new Set(['جامعه', 'مكتبه', 'مدرسه']);
+
 /** تجذيع خفيف: إزالة «ال» وأدوات الجر الملتصقة وبعض اللواحق الشائعة */
 export function stem(t) {
   if (t.length > 4) {
@@ -13,6 +16,7 @@ export function stem(t) {
       if (t.startsWith(p) && t.length - p.length >= 3) { t = t.slice(p.length); break; }
     }
   }
+  if (KEEP_TA.has(t)) return t;
   if (t.length > 4 && (t.endsWith('ات') || t.endsWith('ون') || t.endsWith('ين'))) t = t.slice(0, -2);
   else if (t.length > 3 && t.endsWith('ه')) t = t.slice(0, -1);
   return t;
@@ -42,9 +46,31 @@ export class SearchIndex {
     this.cats = new Map();
     this.catTokens = [];
     this.areaNames = [];
+    this.rural = new Set();
+    this.gen = 0;
   }
 
   setData(items, cats, areas) {
+    this._setup(cats, areas);
+    for (const it of items) this.prepare(it);
+    this.items = items;
+  }
+
+  /** مثل setData لكن على دفعات تتخلّلها فترات راحة للمتصفح، فلا يتجمّد الجوال أثناء فهرسة آلاف الأنشطة.
+   *  تبقى القائمة القديمة قيد الاستعمال حتى تكتمل الجديدة؛ وتعيد false إن جاء تحديث أحدث قبل اكتمالها. */
+  async setDataChunked(items, cats, areas, chunk = 1000) {
+    const gen = ++this.gen;
+    this._setup(cats, areas);
+    for (let i = 0; i < items.length; i += chunk) {
+      for (let j = i; j < Math.min(i + chunk, items.length); j++) this.prepare(items[j]);
+      if (i + chunk < items.length) await new Promise((r) => setTimeout(r, 0));
+      if (gen !== this.gen) return false;
+    }
+    this.items = items;
+    return true;
+  }
+
+  _setup(cats, areas) {
     this.cats = new Map(cats.map((c) => [c.i, c]));
     this.catTokens = cats.map((c) => ({
       id: c.i,
@@ -55,14 +81,15 @@ export class SearchIndex {
       ].map(stem))],
     }));
     this.areaNames = areas.map((a) => ({ name: a.n, norm: normalize(a.n), stems: tokens(a.n).map(stem) }));
-    for (const it of items) this.prepare(it);
-    this.items = items;
+    // بلدات «ريف حماة»: نشاط حيّه بلدة ريفية لا يظهر في قوائم المدينة بل في بوابة الريف
+    this.rural = new Set(areas.filter((a) => a.r).map((a) => a.n));
   }
 
   prepare(it) {
     const cat = this.cats.get(it.c);
     const nm = normalize(it.n);
     it._nn = nm;
+    it._r = !!(it.a && this.rural && this.rural.has(it.a));
     it._tok = nm.split(' ').map(stem);
     it._hay = normalize([cat?.n, (it.t || []).join(' '), it.a, it.d, it.e].filter(Boolean).join(' '));
     it._ext = it._hay.split(' ').map(stem);
@@ -71,13 +98,16 @@ export class SearchIndex {
     it._pop = it.k ? Math.min(4, Math.log2(1 + it.k)) : 0;
   }
 
-  /** يعيد { results, cats: [تصنيفات مطابقة], fuzzy: bool } */
-  search(query, { cat = null, area = null } = {}) {
+  /** يعيد { results, cats: [تصنيفات مطابقة], areas: [أحياء مطابقة], fuzzy: bool }
+   *  scope: 'all' (الافتراضي) | 'city' (بلا ريف حماة) | 'rural' (ريف حماة وحده). noFuzzy: بلا بحث تقريبي. */
+  search(query, { cat = null, area = null, scope = 'all', noFuzzy = false } = {}) {
     const q = toLatinDigits(query || '').trim();
     let pool = this.items;
+    if (scope === 'city') pool = pool.filter((it) => !it._r);
+    else if (scope === 'rural') pool = pool.filter((it) => it._r);
     if (cat) pool = pool.filter((it) => it.c === cat);
     if (area) pool = pool.filter((it) => it.a === area);
-    if (!q) return { results: pool, cats: [], fuzzy: false, terms: [] };
+    if (!q) return { results: pool, cats: [], areas: [], fuzzy: false, terms: [] };
 
     // البحث برقم الهاتف
     const digits = q.replace(/[\s\-+()]/g, '');
@@ -85,7 +115,7 @@ export class SearchIndex {
       let d = digits.replace(/^00963|^963/, '').replace(/^0+/, '').replace(/^33(\d{7})$/, '13$1');
       if (!d) d = digits;
       const results = pool.filter((it) => it._dig.includes(d));
-      return { results, cats: [], fuzzy: false, terms: [], phone: true };
+      return { results, cats: [], areas: [], fuzzy: false, terms: [], phone: true };
     }
 
     const raw = tokens(q).filter((t) => !STOP.has(t));
@@ -148,6 +178,7 @@ export class SearchIndex {
 
     let fuzzy = false;
     const fuzzyCat = [];
+    if (!scored.length && noFuzzy) return { results: [], cats: [], areas: [], fuzzy: false, terms: origStems };
     if (!scored.length) {
       fuzzy = true;
       // فقط لكلمة لم تطابق تصنيفاً ولا حياً («كازو» حي، وليست خطأً في «كاتو»)
@@ -156,25 +187,31 @@ export class SearchIndex {
           ? new Set(this.catTokens.filter((ct) => ct.stems.some((x) => x.length >= 4 && near(x, s))).map((ct) => ct.id))
           : new Set());
       });
+      // كلمة «اسمية» = لا تدل على تصنيف ولا حيّ («الشفاء» في «صيدلية الشفاء»): إن وُجدت فلا يكفي أن يكون النشاط من التصنيف نفسه
+      const nameTerm = origStems.map((s, i) => s.length >= 3 && !catHits[i].size && !fuzzyCat[i].size && !areaHits[i].size);
+      const needName = nameTerm.some(Boolean);
       for (const it of pool) {
         let total = 0;
+        let nameHit = false;
         for (let i = 0; i < origStems.length; i++) {
           const s = origStems[i];
           if (s.length < 3) continue;
           if (catHits[i].has(it.c) || fuzzyCat[i].has(it.c)) total += 8;
-          else if (it._tok.some((tk) => tk.startsWith(s))) total += catHits[i].size || fuzzyCat[i].size ? 3 : 6;
+          else if (it._tok.some((tk) => tk.startsWith(s))) { total += catHits[i].size || fuzzyCat[i].size ? 3 : 6; if (nameTerm[i]) nameHit = true; }
           else if (areaHits[i].has(it.a)) total += 4;
-          else if (s.length >= 5 && it._tok.some((tk) => near(tk, s))) total += 3;
+          else if (s.length >= 5 && it._tok.some((tk) => near(tk, s))) { total += 3; if (nameTerm[i]) nameHit = true; }
           else if (it._ext.some((x) => x.startsWith(s))) total += 1;
         }
-        if (total) scored.push([total + (it._hasPhone ? 1 : 0) + it._pop, it]);
+        if (total && (!needName || nameHit)) scored.push([total + (it._hasPhone ? 1 : 0) + it._pop, it]);
       }
     }
 
     scored.sort((a, b) => b[0] - a[0] || a[1].n.localeCompare(b[1].n, 'ar'));
-    if (fuzzy && scored.length > 60) scored.length = 60;
+    if (fuzzy && scored.length > 40) scored.length = 40;
     const cats = [...new Set([...catHits, ...fuzzyCat].flatMap((s) => [...s]))].slice(0, 4);
-    return { results: scored.map((x) => x[1]), cats, fuzzy, terms: origStems };
+    // الأحياء التي تطابقها كل كلمات البحث («الحاضر»، «حي الحاضر») فقط، لا «سوق» وحدها
+    const areas = areaHits.length ? [...areaHits[0]].filter((n) => areaHits.every((s) => s.has(n))).slice(0, 3) : [];
+    return { results: scored.map((x) => x[1]), cats, areas, fuzzy, terms: origStems };
   }
 }
 
