@@ -259,14 +259,28 @@ function emergencyFor(q) {
 
 // الصيدليات المناوبة: إعداد public «duty» من الإدارة { from, to, ids, note }؛ يظهر بين التاريخين بساعة الجهاز ويختفي وحده بعدهما
 const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+// رابط جدول المناوبة الرسمي: مجموعة واتساب أو صفحة فيسبوك فقط (نطاقات معروفة، https)
+function dutyLink(url) {
+  const u = safeUrl(url);
+  if (!u) return null;
+  let host;
+  try { host = new URL(u).hostname.replace(/^(www|m)\./, ''); } catch { return null; }
+  if (['chat.whatsapp.com', 'wa.me', 'whatsapp.com'].includes(host)) return { href: u, cls: 'btn-wa', icon: 'wa', label: 'جدول المناوبة على واتساب' };
+  if (['facebook.com', 'fb.com', 'fb.me'].includes(host)) return { href: u, cls: 'btn-soft', icon: 'fb', label: 'جدول المناوبة على فيسبوك' };
+  return null;
+}
+
 function dutyHtml() {
   const d = state.settings.duty;
-  if (!d || !Array.isArray(d.ids) || !d.ids.length) return '';
+  if (!d) return '';
   const t = todayStr();
-  if ((d.from && t < d.from) || (d.to && t > d.to)) return '';
-  const list = d.ids.map((id) => state.byId.get(id)).filter(Boolean);
-  if (!list.length) return '';
-  return `<section class="section duty">${sectionHead('💊 صيدليات مناوبة', esc(d.note || 'اتصل قبل الذهاب للتأكد من المناوبة'))}<div class="rail">${list.map((it) => card(it)).join('')}</div></section>`;
+  const inRange = !((d.from && t < d.from) || (d.to && t > d.to));
+  const list = inRange && Array.isArray(d.ids) ? d.ids.map((id) => state.byId.get(id)).filter(Boolean) : [];
+  const link = dutyLink(d.link);
+  if (!list.length && !link) return '';
+  const sub = list.length ? (d.note || 'اتصل قبل الذهاب للتأكد من المناوبة') : 'اطّلع على جدول الصيدليات المناوبة من الرابط';
+  const btn = link ? `<div class="duty-link"><a class="btn ${link.cls}" href="${esc(link.href)}" target="_blank" rel="noopener noreferrer">${I(link.icon, 'sm')}${link.label}</a></div>` : '';
+  return `<section class="section duty">${sectionHead('💊 صيدليات مناوبة', esc(sub))}${btn}${list.length ? `<div class="rail">${list.map((it) => card(it)).join('')}</div>` : ''}</section>`;
 }
 
 function ruralCard() {
