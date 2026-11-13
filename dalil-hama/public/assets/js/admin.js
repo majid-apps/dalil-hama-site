@@ -2075,6 +2075,7 @@ function viewSettings(el) {
           <label class="field"><span>إلى تاريخ <em>(اختياري)</em></span><input class="input" type="date" name="to" value="${esc(duty.to || '')}"></label>
         </div>
         <label class="field"><span>ملاحظة للزوار <em>(اختياري)</em></span><input class="input" name="note" maxlength="120" value="${esc(duty.note || '')}" placeholder="مثال: مناوبة هذا الأسبوع"></label>
+        <label class="field"><span>رابط جدول المناوبة <em>(مجموعة واتساب أو صفحة فيسبوك، اختياري)</em></span><input class="input" name="link" dir="ltr" value="${esc(duty.link || '')}" placeholder="https://chat.whatsapp.com/…"></label>
         <div class="field"><span>الصيدليات المناوبة</span><div id="duty-chosen"></div>
           <input class="input" id="duty-q" placeholder="ابحث باسم الصيدلية أو رقمها لإضافتها" autocomplete="off"><div id="duty-res"></div></div>
         <div class="toolbar"><button class="btn btn-primary" ${owner ? '' : 'disabled'}>حفظ</button><button class="btn btn-ghost" type="button" id="duty-off" ${owner ? '' : 'disabled'}>إيقاف العرض</button></div></form></div>
@@ -2123,16 +2124,22 @@ function viewSettings(el) {
   };
   $('#s-duty').onsubmit = (e) => {
     e.preventDefault();
-    if (!dutyIds.length) return toast('اختر صيدلية واحدة على الأقل، أو اضغط «إيقاف العرض»', true);
     const fd = new FormData(e.target);
+    // الرابط وحده يكفي (يظهر زر الجدول دون قائمة)، ولا يُقبل إلا واتساب أو فيسبوك
+    const rawLink = String(fd.get('link') || '').trim();
+    const link = safeUrl(rawLink);
+    let host = '';
+    try { host = link ? new URL(link).hostname.replace(/^(www|m)\./, '') : ''; } catch { /* ignore */ }
+    if (rawLink && !['chat.whatsapp.com', 'wa.me', 'whatsapp.com', 'facebook.com', 'fb.com', 'fb.me'].includes(host)) return toast('الرابط يجب أن يكون لمجموعة واتساب أو صفحة فيسبوك', true);
+    if (!dutyIds.length && !link) return toast('اختر صيدلية واحدة على الأقل، أو ضع رابط الجدول، أو اضغط «إيقاف العرض»', true);
     const now = new Date();
     const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
     const from = fd.get('from') || today;
     const to = fd.get('to') || from;
     if (to < from) return toast('تاريخ النهاية قبل البداية', true);
-    saveSetting('duty', { from, to, ids: dutyIds, note: fd.get('note').trim() });
+    saveSetting('duty', { from, to, ids: dutyIds, note: fd.get('note').trim(), link });
   };
-  $('#duty-off').onclick = () => { dutyIds = []; dutyDraw(); saveSetting('duty', { ids: [] }); };
+  $('#duty-off').onclick = () => { dutyIds = []; dutyDraw(); $('#s-duty [name=link]').value = ''; saveSetting('duty', { ids: [], link: '' }); };
   $('#em-add').onclick = () => $('#em-rows').insertAdjacentHTML('beforeend', emRow({}));
   $('#em-rows').onclick = (e) => { const b = e.target.closest('[data-rm]'); if (b) b.closest('.ph').remove(); };
   $('#s-em').onsubmit = (e) => {

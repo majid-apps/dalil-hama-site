@@ -1,10 +1,10 @@
 // عامل الخدمة: يجعل الدليل يعمل بسرعة وحتى دون إنترنت بعد أول زيارة.
-const VERSION = 'dh-v39';
+const VERSION = 'dh-v40';
 const SHELL = [
   '/',
-  '/assets/css/app.css?v=10',
+  '/assets/css/app.css?v=11',
   '/assets/js/theme.js?v=3',
-  '/assets/js/app.js?v=18',
+  '/assets/js/app.js?v=19',
   '/assets/js/core.js',
   '/assets/js/search.js',
   '/assets/js/config.js',
