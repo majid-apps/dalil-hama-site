@@ -791,6 +791,7 @@ function viewDash(el) {
   const task = (href, n, label, hint, ic) => `<a class="task${n ? ' on' : ''}" href="${href}">${I(ic)}<b>${fmtNum(n)}</b><span>${label}<small>${hint}</small></span></a>`;
   el.innerHTML = `
     <div class="panel tasks-panel" style="margin-top:0"><h2>${I('check')}مهام اليوم</h2>
+      ${backupAgeDays() === null || backupAgeDays() >= BACKUP_DAYS ? `<div class="warnbox" style="margin-bottom:10px">${I('alert', 'sm')}${backupAgeDays() === null ? 'لم تأخذ نسخة احتياطية من هذا الجهاز بعد.' : `مضى ${fmtNum(backupAgeDays())} يوماً على آخر نسخة احتياطية.`} <a href="#io" style="font-weight:700;color:var(--brand)">خذ نسخة كاملة الآن</a></div>` : ''}
       ${t.todo + t.sent + t.req + t.rep ? `<div class="tasks">
         ${task('#cands?tab=todo', t.todo, 'مرشحون للمراسلة', 'أرسل لهم رسالة الموافقة', 'wa')}
         ${task('#cands?tab=sent', t.sent, 'بانتظار ردّهم', 'انشر من وافق منهم', 'clock')}
@@ -2017,18 +2018,198 @@ function download(name, content, type) {
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
 
+// ─────────────── نسخة كاملة (البيانات + البرنامج) وتنبيه النسخ ───────────────
+
+const BACKUP_KEY = 'dh:admin-last-backup';
+const BACKUP_DAYS = 14;
+const markBackup = () => store.set(BACKUP_KEY, Date.now());
+/** أيام منذ آخر نسخة أُخذت من هذا الجهاز (null = لم تؤخذ بعد) */
+const backupAgeDays = () => { const t = Number(store.get(BACKUP_KEY)); return t ? Math.max(0, Math.floor((Date.now() - t) / 86400000)) : null; };
+// ملفات الواجهة (public/) التي تدخل النسخة الكاملة كما يخدمها الموقع الآن؛ عند إضافة ملف إلى public أضفه هنا (sitemap.xml يولّده السيرفر فلا يدخل)
+const SITE_FILES = [
+  '404.html',
+  'admin/index.html',
+  'admin/manifest.webmanifest',
+  'apple-touch-icon.png',
+  'assets/css/admin.css',
+  'assets/css/app.css',
+  'assets/fonts/messiri-arabic-700.woff2',
+  'assets/fonts/messiri-latin-700.woff2',
+  'assets/fonts/plex-arabic-400.woff2',
+  'assets/fonts/plex-arabic-500.woff2',
+  'assets/fonts/plex-arabic-700.woff2',
+  'assets/fonts/plex-latin-400.woff2',
+  'assets/fonts/plex-latin-500.woff2',
+  'assets/fonts/plex-latin-700.woff2',
+  'assets/img/admin-192.png',
+  'assets/img/admin-512.png',
+  'assets/img/admin-apple-touch.png',
+  'assets/img/apple-touch-icon.png',
+  'assets/img/icon-192.png',
+  'assets/img/icon-512.png',
+  'assets/img/icon-maskable-512.png',
+  'assets/img/icons.svg',
+  'assets/img/og.jpg',
+  'assets/img/og.png',
+  'assets/js/admin.js',
+  'assets/js/app.js',
+  'assets/js/config.js',
+  'assets/js/core.js',
+  'assets/js/owner.js',
+  'assets/js/search.js',
+  'assets/js/theme.js',
+  'favicon.ico',
+  'favicon.svg',
+  'google77f7f09103a11f54.html',
+  'index.html',
+  'manifest.webmanifest',
+  'privacy/index.html',
+  'r/index.html',
+  'robots.txt',
+  'sw.js',
+  'release.txt',
+];
+const BACKUP_TABLES = [
+  ['categories', 'categories?select=*&order=id.asc'], ['areas', 'areas?select=*&order=id.asc'], ['listings', 'listings?select=*&order=id.asc'],
+  ['settings', 'settings?select=*&order=key.asc'], ['reports', 'reports?select=*&order=id.asc'], ['excluded_phones', 'excluded_phones?select=*&order=phone.asc'],
+  ['held_phones', 'held_phones?select=*&order=phone.asc'], ['owner_links', 'owner_links?select=*&order=token.asc'], ['listing_stats', 'listing_stats?select=*&order=listing_id.asc'],
+  ['daily_stats', 'daily_stats?select=*&order=day.asc,kind.asc'], ['search_terms', 'search_terms?select=*&order=term.asc'], ['audit_log', 'audit_log?select=*&order=id.asc'],
+  ['admins', 'admins?select=user_id,role,created_at&order=created_at.asc'], // بلا البريد ولا كلمات المرور
+];
+
+// ZIP بلا مكتبات: كل ملف مخزَّن أو مضغوط deflate (إن دعمه المتصفح)، وأسماؤه UTF-8
+const CRC_T = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+const crc32 = (u8) => { let c = 0xFFFFFFFF; for (let i = 0; i < u8.length; i++) c = CRC_T[(c ^ u8[i]) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+async function deflateRaw(u8) {
+  if (typeof CompressionStream !== 'function') return null;
+  try { return new Uint8Array(await new Response(new Blob([u8]).stream().pipeThrough(new CompressionStream('deflate-raw'))).arrayBuffer()); } catch { return null; }
+}
+async function makeZip(files) {
+  const enc = new TextEncoder();
+  const chunks = [];
+  const central = [];
+  let offset = 0;
+  const now = new Date();
+  const dosTime = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+  const dosDate = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+  for (const f of files) {
+    const name = enc.encode(f.name);
+    const crc = crc32(f.data);
+    let body = f.data;
+    let method = 0;
+    if (f.compress) { const z = await deflateRaw(f.data); if (z && z.length < f.data.length) { body = z; method = 8; } }
+    const h = new DataView(new ArrayBuffer(30));
+    h.setUint32(0, 0x04034b50, true); h.setUint16(4, 20, true); h.setUint16(6, 0x0800, true); h.setUint16(8, method, true);
+    h.setUint16(10, dosTime, true); h.setUint16(12, dosDate, true); h.setUint32(14, crc, true); h.setUint32(18, body.length, true);
+    h.setUint32(22, f.data.length, true); h.setUint16(26, name.length, true);
+    chunks.push(new Uint8Array(h.buffer), name, body);
+    const c = new DataView(new ArrayBuffer(46));
+    c.setUint32(0, 0x02014b50, true); c.setUint16(4, 20, true); c.setUint16(6, 20, true); c.setUint16(8, 0x0800, true); c.setUint16(10, method, true);
+    c.setUint16(12, dosTime, true); c.setUint16(14, dosDate, true); c.setUint32(16, crc, true); c.setUint32(20, body.length, true);
+    c.setUint32(24, f.data.length, true); c.setUint16(28, name.length, true); c.setUint32(42, offset, true);
+    central.push(new Uint8Array(c.buffer), name);
+    offset += 30 + name.length + body.length;
+  }
+  const cdSize = central.reduce((n, a) => n + a.length, 0);
+  const e = new DataView(new ArrayBuffer(22));
+  e.setUint32(0, 0x06054b50, true); e.setUint16(8, files.length, true); e.setUint16(10, files.length, true); e.setUint32(12, cdSize, true); e.setUint32(16, offset, true);
+  return new Blob([...chunks, ...central, new Uint8Array(e.buffer)], { type: 'application/zip' });
+}
+
+/** يجمع كل جداول القاعدة وكل ملفات البرنامج كما على الموقع في ملف ZIP واحد (data.json + site/ + README.txt) */
+async function buildFullBackup(setStatus) {
+  const enc = new TextEncoder();
+  const data = {};
+  const problems = [];
+  for (const [name, q] of BACKUP_TABLES) {
+    setStatus(`البيانات: ${name}…`);
+    try { data[name] = await fetchPages(q); } catch (e) { data[name] = []; problems.push(`${name}: ${errMsg(e)}`); }
+  }
+  let release = '';
+  try { const r = await fetch('/release.txt', { cache: 'no-store' }); if (r.ok) release = (await r.text()).trim(); } catch { /* بلا سجل إصدار */ }
+  const files = [];
+  const missing = [];
+  const text = /\.(html|js|css|svg|xml|webmanifest|txt|json)$/;
+  let i = 0;
+  for (const p of SITE_FILES) {
+    setStatus(`البرنامج: ${++i} من ${SITE_FILES.length}…`);
+    let got = null;
+    for (let attempt = 0; attempt < 2 && !got; attempt++) { // محاولة ثانية: انقطاع عابر لا يُسقط ملفاً
+      try {
+        // ?bk=… يتجاوز تعارضاً في كروم مع طلب favicon.ico الذي يجريه المتصفح بنفسه
+        const r = await fetch(`/${p}?bk=${Date.now()}`, { cache: 'no-store' });
+        if (r.ok) got = new Uint8Array(await r.arrayBuffer());
+        else if (r.status === 404) break;
+      } catch { /* نعيد المحاولة */ }
+    }
+    if (got) files.push({ name: `site/${p}`, data: got, compress: text.test(p) }); else missing.push(p);
+  }
+  setStatus('جارٍ تجهيز الملف…');
+  const counts = Object.fromEntries(Object.entries(data).map(([k, v]) => [k, v.length]));
+  const meta = { app: 'dalil-hama', exported_at: new Date().toISOString(), release: release || null, counts, tables_with_problems: problems, site_files: files.length, site_files_missing: missing };
+  const sha = /^[0-9a-f]{40}$/.test(release) ? release : 'main';
+  const readme = `نسخة كاملة من دليل حماة — ${meta.exported_at}
+إصدار البرنامج على السيرفر: ${release || 'غير معروف'}
+
+محتويات هذا الملف
+- data.json : كل جداول القاعدة (${Object.keys(counts).join('، ')}) بصيغة JSON.
+- site/     : كل ملفات الدليل والإدارة كما يخدمها الموقع الآن (الواجهة كاملة).
+- README.txt: هذا الشرح.
+${missing.length ? `ملفات لم تُجلب: ${missing.join('، ')}\n` : ''}${problems.length ? `جداول تعذّر جلبها: ${problems.join('؛ ')}\n` : ''}
+ما ليس في الملف
+- كلمات مرور الإدارة وبريدها (لا تُصدَّر أصلاً)، ومفاتيح تلغرام والسيرفر.
+- كود السيرفر (إعداد Caddy وسكربت النشر وتعريف القاعدة migrations): هو في GitHub، وهذا رابط الإصدار نفسه:
+  https://github.com/majid-apps/dalil-hama-site/archive/${sha}.zip
+
+الاسترجاع (يحتاج مطوراً أو جلسة Claude، ولا يُفتح بنقرة)
+1) على سيرفر جديد: ثبّت الكود من رابط GitHub أعلاه ثم نفّذ sudo dalil-hama-site install-db (يبني القاعدة من migrations).
+2) أعد البيانات من data.json إلى الجداول بالترتيب: categories، areas، listings، settings، ثم البقية.
+3) ملفات site/ نسخة احتياطية للواجهة إن تعذّر الوصول إلى GitHub.
+
+تنبيه: الملف غير مشفّر ويحوي أرقاماً وملاحظات إدارية وروابط أصحاب الأرقام؛ لا تتركه في مكان عام.
+`;
+  const all = [
+    { name: 'README.txt', data: enc.encode(readme), compress: true },
+    { name: 'data.json', data: enc.encode(JSON.stringify({ meta, ...data })), compress: true },
+    ...files,
+  ];
+  return { blob: await makeZip(all), meta, missing, problems };
+}
+
 function viewIO(el) {
   const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
-  el.innerHTML = `<div class="panel" style="margin-top:0"><h2>${I('download')}تصدير نسخة احتياطية</h2>
+  const age = backupAgeDays();
+  el.innerHTML = `<div class="panel" style="margin-top:0"><h2>${I('download')}نسخة كاملة: البيانات والبرنامج</h2>
+      <p class="muted" style="margin-top:0">ملف ZIP واحد يُحفظ على جوالك: كل جداول القاعدة (البطاقات والبلاغات والأرقام المستبعدة وروابط أصحاب الأرقام والإعدادات والإحصاءات وسجل التعديلات) مع كل ملفات الدليل والإدارة كما هي على الموقع الآن وشرح للاسترجاع. لا يحوي كلمات المرور. الملف غير مشفّر فلا تتركه في مكان عام.</p>
+      <div class="toolbar" style="margin:0"><button class="btn btn-primary" id="ex-full">${I('download', 'sm')}تنزيل النسخة الكاملة (ZIP)</button></div>
+      <p class="muted" id="ex-full-st" style="margin:8px 0 0">${age === null ? 'لم تؤخذ نسخة من هذا الجهاز بعد.' : `آخر نسخة من هذا الجهاز قبل ${fmtNum(age)} يوماً.`}</p></div>
+    <div class="panel"><h2>${I('download')}تصدير نسخة احتياطية</h2>
       <p class="muted" style="margin-top:0">احفظ نسخة من كل البيانات بشكل دوري. ملف CSV يفتح في Excel، وملف JSON نسخة كاملة دقيقة.</p>
       <div class="toolbar" style="margin:0"><button class="btn btn-primary" id="ex-csv">${I('download', 'sm')}تصدير CSV (${fmtNum(A.listings.length)})</button><button class="btn btn-soft" id="ex-csv-pub">CSV المنشور فقط</button><button class="btn btn-soft" id="ex-json">نسخة JSON كاملة</button></div></div>
     <div class="panel"><h2>${I('upload')}استيراد من ملف CSV</h2>
       <p class="muted" style="margin-top:0">يقبل ملف التصدير من هذه اللوحة، أو ملف النسخة الاحتياطية من الدليل القديم. الأنشطة التي لها «المعرف» نفسه تُحدَّث، والجديدة تُضاف.</p>
       <label class="drop" id="drop"><input type="file" accept=".csv,text/csv" id="file" hidden><b>اسحب الملف هنا أو اضغط للاختيار</b><br><span class="muted">CSV بترميز UTF-8</span></label>
       <div id="import-preview"></div></div>`;
-  $('#ex-csv').onclick = () => download(`dalil-hama-${stamp}.csv`, toCsv(A.listings), 'text/csv;charset=utf-8');
-  $('#ex-csv-pub').onclick = () => download(`dalil-hama-published-${stamp}.csv`, toCsv(A.listings.filter((r) => r.status === 'approved')), 'text/csv;charset=utf-8');
-  $('#ex-json').onclick = () => download(`dalil-hama-${stamp}.json`, JSON.stringify({ exported_at: new Date().toISOString(), categories: A.cats, areas: A.areas, settings: A.settings, listings: A.listings }, null, 1), 'application/json');
+  $('#ex-csv').onclick = () => { download(`dalil-hama-${stamp}.csv`, toCsv(A.listings), 'text/csv;charset=utf-8'); markBackup(); };
+  $('#ex-csv-pub').onclick = () => { download(`dalil-hama-published-${stamp}.csv`, toCsv(A.listings.filter((r) => r.status === 'approved')), 'text/csv;charset=utf-8'); markBackup(); };
+  $('#ex-json').onclick = () => { download(`dalil-hama-${stamp}.json`, JSON.stringify({ exported_at: new Date().toISOString(), categories: A.cats, areas: A.areas, settings: A.settings, listings: A.listings }, null, 1), 'application/json'); markBackup(); };
+  $('#ex-full').onclick = async (e) => {
+    const btn = e.currentTarget;
+    const st = $('#ex-full-st');
+    btn.disabled = true;
+    try {
+      const { blob, meta, missing, problems } = await buildFullBackup((m) => { if (st.isConnected) st.textContent = m; });
+      download(`dalil-hama-full-${stamp}.zip`, blob, 'application/zip');
+      markBackup();
+      const warn = missing.length || problems.length;
+      if (st.isConnected) st.textContent = `تم حفظ الملف (${(blob.size / 1048576).toFixed(1)} ميغابايت): ${fmtNum(meta.counts.listings || 0)} بطاقة و${fmtNum(meta.site_files)} ملفاً من البرنامج${warn ? ` — تنبيه: ${missing.length ? `ملفات لم تُجلب (${missing.length})` : ''}${missing.length && problems.length ? ' و' : ''}${problems.length ? `جداول تعذّرت (${problems.length})` : ''}، التفاصيل في README.txt` : ''}.`;
+      toast(warn ? 'حُفظت النسخة مع تنبيهات، راجع README.txt' : 'تم حفظ النسخة الكاملة ✓', !!warn);
+    } catch (err) {
+      if (st.isConnected) st.textContent = `تعذّر إنشاء النسخة: ${errMsg(err)}`;
+      toast(`تعذّر إنشاء النسخة: ${errMsg(err)}`, true);
+    }
+    if (btn.isConnected) btn.disabled = false;
+  };
   const drop = $('#drop');
   const handle = async (file) => {
     const rows = parseCsv(await file.text());
