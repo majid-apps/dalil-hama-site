@@ -613,6 +613,7 @@ async function start() {
 const catName = (id) => (A.catById.get(id) || {}).name || 'بلا تصنيف';
 const catIcon = (id) => esc((A.catById.get(id) || {}).icon || '📍');
 const catHue = (id) => { const c = A.catById.get(id); return c ? (c.sort * 4.7 + c.id * 31) % 360 : 170; };
+const isLatinName = (r) => /[A-Za-z]/.test(r.name || '') && !/[\u0600-\u06FF]/.test(r.name || '');
 const phonesHtml = (r) => (r.phones || []).map((p) => `<bdi dir="ltr">${esc(formatPhone(p))}</bdi>`).join(' · ') || '<span style="color:var(--danger)">بلا رقم</span>';
 const st = (s, map = STATUS) => `<span class="st ${s}">${map[s] || s}</span>`;
 const fmtDate = (d) => new Date(d).toLocaleString('ar-SY', { dateStyle: 'medium', timeStyle: 'short' });
@@ -1490,6 +1491,7 @@ function filtered() {
     if (f.flag === 'featured' && !r.featured) return false;
     if (f.flag === 'verified' && !r.verified) return false;
     if (f.flag === 'odd' && !(r.phones || []).some((p) => !/^0\d{9}$/.test(p))) return false;
+    if (f.flag === 'latin' && !isLatinName(r)) return false;
     return true;
   });
 }
@@ -1505,7 +1507,7 @@ function viewListings(el) {
       <select class="input" id="f-area"><option value="">كل الأحياء</option><option value="__none"${f.area === '__none' ? ' selected' : ''}>بلا حي</option>${A.areas.map((a) => `<option${f.area === a.name ? ' selected' : ''}>${esc(a.name)}</option>`).join('')}</select>
       <select class="input" id="f-flag"><option value="">كل البيانات</option>
         <option value="nophone"${f.flag === 'nophone' ? ' selected' : ''}>بلا رقم</option><option value="noloc"${f.flag === 'noloc' ? ' selected' : ''}>بلا موقع</option>
-        <option value="noarea"${f.flag === 'noarea' ? ' selected' : ''}>بلا حي</option><option value="odd"${f.flag === 'odd' ? ' selected' : ''}>أرقام غير اعتيادية</option>
+        <option value="noarea"${f.flag === 'noarea' ? ' selected' : ''}>بلا حي</option><option value="odd"${f.flag === 'odd' ? ' selected' : ''}>أرقام غير اعتيادية</option><option value="latin"${f.flag === 'latin' ? ' selected' : ''}>اسم لاتيني فقط (يحتاج اسماً عربياً للبحث)</option>
         <option value="featured"${f.flag === 'featured' ? ' selected' : ''}>مميّز</option><option value="verified"${f.flag === 'verified' ? ' selected' : ''}>موثّق</option></select>
       <select class="input" id="f-sort"><option value="new">الأحدث</option><option value="updated"${f.sort === 'updated' ? ' selected' : ''}>آخر تعديل</option><option value="name"${f.sort === 'name' ? ' selected' : ''}>أبجدياً</option></select>
     </div>
@@ -1727,6 +1729,54 @@ function auditItem(l) {
   return `<li><div><b>${esc(who)}</b> ${act} ${l.listing_id ? `<a href="#" data-edit="${l.listing_id}" style="color:var(--brand);font-weight:700">${esc(l.listing_name || '#' + l.listing_id)}</a>` : esc(l.listing_name || '')}</div><div class="when">${fmtDate(l.created_at)}</div>${chg ? `<div class="chg">${chg}</div>` : ''}</li>`;
 }
 
+/** يدمج drop في keep (الأرقام والمعلومات الناقصة)، ينقل بلاغاته إلى keep ثم يحذفه */
+async function mergeRows(keep, drop) {
+  const body = {
+    phones: [...new Set([...(keep.phones || []), ...(drop.phones || [])])],
+    area: keep.area || drop.area,
+    address: keep.address || drop.address,
+    map_url: keep.map_url || drop.map_url,
+    lat: keep.lat ?? drop.lat,
+    lng: keep.lng ?? drop.lng,
+    website: keep.website || drop.website,
+    description: keep.description || drop.description,
+    tags: [...new Set([...(keep.tags || []), ...(drop.tags || [])])],
+  };
+  const [row] = await rest(`listings?id=eq.${keep.id}`, { method: 'PATCH', body, headers: rep });
+  await rest(`reports?listing_id=eq.${drop.id}`, { method: 'PATCH', body: { listing_id: keep.id } });
+  await rest(`listings?id=eq.${drop.id}`, { method: 'DELETE' });
+  removeLocal(drop.id);
+  upsertLocal(row);
+  return row;
+}
+
+/** أفضل بطاقة تُبقى من مجموعة مكررة: المنشورة أولاً، ثم الأكمل بيانات، ثم الأقدم */
+function pickKeeper(rs) {
+  const score = (r) => (r.status === 'approved' ? 1000 : 0) + (r.phones || []).length * 10 + (r.lat ? 5 : 0) + (r.address ? 3 : 0) + (r.area ? 2 : 0) + (r.website ? 1 : 0) + (r.description ? 1 : 0) - r.id / 1e9;
+  return rs.reduce((a, b) => (score(b) > score(a) ? b : a));
+}
+
+/** دمج مجموعة مكررة كاملة بتأكيد واحد (يُنبَّه إن اختلفت عناوينها: قد تكون فروعاً مستقلة) */
+async function mergeGroup(ids, after) {
+  const rs = ids.map((id) => A.byId.get(id)).filter(Boolean);
+  if (rs.length < 2) return;
+  const keep = pickKeeper(rs);
+  const drops = rs.filter((r) => r.id !== keep.id);
+  const addrs = new Set(rs.map((r) => (r.address || '').trim()).filter(Boolean));
+  const msg = `دمج ${fmtNum(drops.length)} ${drops.length === 1 ? 'بطاقة' : 'بطاقات'} في «<b>${esc(keep.name)}</b>» (#${keep.id})، وتُنقل أرقامها ومعلوماتها الناقصة ثم تُحذف:<br>${drops.map((d) => `• ${esc(d.name)} <small>#${d.id}${d.address ? ' · ' + esc(d.address) : ''}</small>`).join('<br>')}${addrs.size > 1 ? '<br><b style="color:var(--danger)">تنبيه: عناوينها مختلفة، فقد تكون فروعاً مستقلة. إن كانت كذلك فلا تدمجها.</b>' : ''}`;
+  if (!(await confirmBox(msg, { ok: 'دمج المجموعة', danger: addrs.size > 1 }))) return;
+  try {
+    for (const d of drops) {
+      const cur = A.byId.get(d.id);
+      const k = A.byId.get(keep.id);
+      if (cur && k) await mergeRows(k, cur);
+    }
+    toast(`تم دمج ${fmtNum(drops.length)} ✓`);
+    refreshStats();
+    if (after) after();
+  } catch (err) { toast(`لم يكتمل الدمج: ${errMsg(err)}`, true); if (after) after(); }
+}
+
 function mergeDialog(keepId) {
   const keep = A.byId.get(keepId);
   if (!keep) return;
@@ -1751,22 +1801,7 @@ function mergeDialog(keepId) {
     if (keep.status !== 'approved' && drop.status === 'approved') [keep, drop] = [drop, keep];
     if (!(await confirmBox(`دمج «${esc(drop.name)}» في «${esc(keep.name)}» ثم حذفه؟`, { ok: 'دمج' }))) return;
     try {
-      const body = {
-        phones: [...new Set([...(keep.phones || []), ...(drop.phones || [])])],
-        area: keep.area || drop.area,
-        address: keep.address || drop.address,
-        map_url: keep.map_url || drop.map_url,
-        lat: keep.lat ?? drop.lat,
-        lng: keep.lng ?? drop.lng,
-        website: keep.website || drop.website,
-        description: keep.description || drop.description,
-        tags: [...new Set([...(keep.tags || []), ...(drop.tags || [])])],
-      };
-      const [row] = await rest(`listings?id=eq.${keep.id}`, { method: 'PATCH', body, headers: rep });
-      await rest(`reports?listing_id=eq.${drop.id}`, { method: 'PATCH', body: { listing_id: keep.id } });
-      await rest(`listings?id=eq.${drop.id}`, { method: 'DELETE' });
-      removeLocal(drop.id);
-      upsertLocal(row);
+      await mergeRows(keep, drop);
       closeSheet();
       toast('تم الدمج ✓');
       route();
@@ -1786,12 +1821,13 @@ function viewQuality(el) {
   const dupNames = [...byName.values()].filter((rs) => rs.length > 1 && !dupPhones.some(([, d]) => d.every((x) => rs.includes(x))));
   const odd = live.filter((r) => (r.phones || []).some((p) => !/^0\d{9}$/.test(p)));
   const count = (fn) => live.filter(fn).length;
-  const group = (rs, title) => `<div class="dup-group"><b>${title}</b><div class="rows">${rs.map((r) => listingRow(r, { select: false, ops: `<button class="btn btn-soft" data-edit="${r.id}">${I('edit', 'sm')}تعديل</button><button class="btn btn-soft" data-merge="${r.id}">${I('merge', 'sm')}دمج</button>` })).join('')}</div></div>`;
+  const group = (rs, title) => `<div class="dup-group"><b>${title}</b> <button class="btn btn-primary" type="button" data-mergegroup="${rs.map((r) => r.id).join(',')}" style="min-height:32px;padding:0 10px;margin-inline-start:8px">${I('merge', 'sm')}دمج المجموعة</button><div class="rows">${rs.map((r) => listingRow(r, { select: false, ops: `<button class="btn btn-soft" data-edit="${r.id}">${I('edit', 'sm')}تعديل</button><button class="btn btn-soft" data-merge="${r.id}">${I('merge', 'sm')}دمج</button>` })).join('')}</div></div>`;
   el.innerHTML = `<div class="kpis">
       <button class="kpi" data-flag="nophone"><small>بلا رقم</small><b>${fmtNum(count((r) => !(r.phones || []).length))}</b></button>
       <button class="kpi" data-flag="noloc"><small>بلا موقع</small><b>${fmtNum(count((r) => !r.lat && !r.map_url))}</b></button>
       <button class="kpi" data-flag="noarea"><small>بلا حي</small><b>${fmtNum(count((r) => !r.area))}</b></button>
       <button class="kpi" data-flag="odd"><small>أرقام غير اعتيادية</small><b>${fmtNum(odd.length)}</b></button>
+      <button class="kpi" data-flag="latin"><small>اسم لاتيني فقط</small><b>${fmtNum(count(isLatinName))}</b></button>
       <div class="kpi ${dupPhones.length ? 'warn' : ''}"><small>أرقام مكررة</small><b>${fmtNum(dupPhones.length)}</b></div>
       <div class="kpi"><small>أسماء مكررة</small><b>${fmtNum(dupNames.length)}</b></div>
     </div>
@@ -1802,6 +1838,8 @@ function viewQuality(el) {
     if (k) { A.f = { q: '', cat: '', status: 'approved', flag: k.dataset.flag, area: '', sort: 'new' }; location.hash = 'listings'; }
     const m = e.target.closest('[data-merge]');
     if (m) mergeDialog(Number(m.dataset.merge));
+    const mg = e.target.closest('[data-mergegroup]');
+    if (mg) mergeGroup(mg.dataset.mergegroup.split(',').map(Number), () => viewQuality(el));
   };
 }
 

@@ -10,6 +10,7 @@
 #   sudo dalil-hama-site previous   الرجوع إلى الإصدار السابق وإيقاف التحديث التلقائي
 #   sudo dalil-hama-site resume     استئناف التحديث التلقائي
 #   sudo dalil-hama-site rollback   إعادة النطاق إلى الموقع القديم فوراً
+#   sudo dalil-hama-site gen        توليد الصفحات الثابتة الآن (معاينة الروابط، الفهرسة، sync جاهز؛ يجري كل 10 دقائق)
 #
 # قاعدة البيانات على السيرفر نفسه (PostgreSQL المحلي، مع PostgREST للبيانات وGoTrue لدخول المشرفين):
 #   sudo dalil-hama-site install-db                 أول مرة: يطلب مفتاح النقل، ثم ينقل البيانات من Supabase ويحوّل الموقع إليها
@@ -50,6 +51,8 @@ AUTH_PORT=${DH_AUTH_PORT:-8032}
 BACKUP_DIR=${DH_BACKUP_DIR:-/var/backups/dalil-hama-site}
 BACKEND_FLAG=$ETC/backend-local
 OVERRIDE=$BASE/override
+# صفحات ثابتة يولّدها الأمر gen من قاعدة السيرفر (data/sync.json وcards وcats وsitemap.xml)
+GEN=$BASE/generated
 # القاعدة المنقولة تُبنى أولاً باسم ${DB}_new ثم تأخذ اسم $DB
 HBA_LINE="host $DB,${DB}_new authenticator,supabase_auth_admin 127.0.0.1/32 scram-sha-256"
 PGRST_VERSION=v13.0.7
@@ -649,6 +652,62 @@ api_routes() {
 EOF
 }
 
+# مسارات الصفحات الثابتة (cmd_gen): تُخدم إن وُجد الملف وإلا يعمل الموقع كما كان، فلا يتعطل شيء إن لم تُولَّد بعد
+gen_routes() {
+  case ${ROUTES:-} in
+    local) ;;
+    supabase) return 0 ;;
+    *) [ -f "$BACKEND_FLAG" ] || return 0 ;;
+  esac
+  sed "s#@GEN@#$GEN#g" <<'EOF'
+
+	@gen_sync path /data/sync.json
+	handle @gen_sync {
+		root * @GEN@
+		header Cache-Control "no-cache"
+		file_server
+	}
+	@gen_sitemap {
+		path /sitemap.xml
+		file {
+			root @GEN@
+			try_files /sitemap.xml
+		}
+	}
+	handle @gen_sitemap {
+		root * @GEN@
+		header Cache-Control "no-cache"
+		file_server
+	}
+	@gen_card {
+		expression {http.request.uri.path} == '/' && {http.request.uri.query}.matches('^l=[0-9]+(&w=1)?$')
+		file {
+			root @GEN@
+			try_files /cards/{http.request.uri.query.l}.html
+		}
+	}
+	handle @gen_card {
+		root * @GEN@
+		rewrite * /cards/{http.request.uri.query.l}.html
+		header Cache-Control "no-cache"
+		file_server
+	}
+	@gen_cat {
+		expression {http.request.uri.path} == '/' && {http.request.uri.query}.matches('^c=[0-9]+$')
+		file {
+			root @GEN@
+			try_files /cats/{http.request.uri.query.c}.html
+		}
+	}
+	handle @gen_cat {
+		root * @GEN@
+		rewrite * /cats/{http.request.uri.query.c}.html
+		header Cache-Control "no-cache"
+		file_server
+	}
+EOF
+}
+
 write_site_conf() {
   local addresses=$1 tmp=$SITE_CONF.new
   mkdir -p "$ETC"; chmod 755 "$ETC"
@@ -682,6 +741,7 @@ $addresses {
 	redir /privacy /privacy/ 301
 	respond /health "ok" 200
 $(api_routes)
+$(gen_routes)
 	file_server
 
 	handle_errors {
@@ -996,6 +1056,7 @@ jwt-aud = "authenticated"
 openapi-mode = "disabled"
 server-host = "127.0.0.1"
 server-port = $API_PORT
+server-cors-allowed-origins = "https://$HOST"
 log-level = "warn"
 EOF
   gotrue_env > "$ETC/auth.env.new"
@@ -1240,6 +1301,44 @@ EOF
   chmod 644 "$UNIT_DIR/dalil-hama-site-backup.service" "$UNIT_DIR/dalil-hama-site-backup.timer"
   systemctl daemon-reload
   systemctl enable --now dalil-hama-site-backup.timer >/dev/null 2>&1 || warn "تعذّر تفعيل النسخ الاحتياطي الليلي"
+}
+
+# مولّد الصفحات الثابتة: كل 10 دقائق، بصلاحيات المستخدم العادي، يقرأ من PostgREST المحلي ويكتب في $GEN وحده
+install_gen_units() {
+  cat > "$UNIT_DIR/dalil-hama-site-gen.service" <<EOF
+[Unit]
+Description=Dalil Hama: generate static pages (link previews, sitemap, prebuilt sync)
+After=dalil-hama-api.service
+
+[Service]
+Type=oneshot
+User=$SITE_USER
+Group=$SITE_USER
+ExecStart=$SELF_DST gen --quiet
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ReadWritePaths=$BASE
+EOF
+  cat > "$UNIT_DIR/dalil-hama-site-gen.timer" <<EOF
+[Unit]
+Description=Dalil Hama: regenerate static pages every 10 minutes
+
+[Timer]
+OnBootSec=4min
+OnUnitActiveSec=10min
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target
+EOF
+  chmod 644 "$UNIT_DIR/dalil-hama-site-gen.service" "$UNIT_DIR/dalil-hama-site-gen.timer"
+  systemctl daemon-reload
+  systemctl enable --now dalil-hama-site-gen.timer >/dev/null 2>&1 || warn "تعذّر تفعيل توليد الصفحات الثابتة؛ يمكنك تشغيله يدوياً: sudo dalil-hama-site gen"
 }
 
 caddy_switch() {   # local|supabase: يعيد كتابة إعداد الموقع ويفعّله؛ يعيد 1 دون تغيير إن رفضه Caddy
@@ -1667,6 +1766,8 @@ $(restore_hint)
       rm -f -- "$ETC/switch-pending"
     fi
     install_backup_units
+    install_gen_units
+    ( QUIET=1 cmd_gen ) || warn "تعذّر توليد الصفحات الثابتة الآن؛ يعاد تلقائياً كل 10 دقائق (أو: sudo dalil-hama-site gen)"
     if [ -z "$(find "$BACKUP_DIR" -maxdepth 1 -name "$DB-*.dump" 2>/dev/null | head -n 1)" ]; then
       ( QUIET=1 cmd_backup ) || warn "تعذّرت النسخة الاحتياطية؛ جرّب: sudo dalil-hama-site backup"
     fi
@@ -1857,11 +1958,210 @@ cmd_status() {
     fi
     say "خدمة البيانات:      $(unit_state dalil-hama-api)    خدمة الدخول: $(unit_state dalil-hama-auth)"
     say "آخر نسخة احتياطية:  ${last:-لا يوجد}"
+    local gl
+    gl=$( { find "$GEN" -maxdepth 1 -name .manifest.json -printf '%TY-%Tm-%Td %TH:%TM\n' 2>/dev/null || true; } | tail -n 1)
+    if [ -n "$gl" ]; then say "الصفحات الثابتة:    آخر توليد $gl ($(unit_state dalil-hama-site-gen.timer))"
+    else say "الصفحات الثابتة:    لم تُولَّد بعد؛ sudo dalil-hama-site gen"; fi
   else
     say "قاعدة البيانات:     Supabase"
     if [ "$on_server" = 1 ]; then
       say "  ! لكن الموقع ما زال يقرأ من قاعدة السيرفر: sudo dalil-hama-site db-rollback"
     fi
+  fi
+}
+
+# مولّد الصفحات الثابتة (بايثون، بلا مكتبات خارجية)
+GEN_PY=$(cat <<'PY'
+import hashlib, html, json, os, re, sys, urllib.request
+
+# دليل حماة: مولّد الصفحات الثابتة (يجري كل 10 دقائق على السيرفر، بلا صلاحيات خاصة)
+#   data/sync.json     نسخة جاهزة من sync الكاملة (ETag) فلا تُشغَّل القاعدة لكل زائر جديد
+#   cards/ID.html      index.html بعنوان ووصف وصورة هذا النشاط (معاينة الروابط في واتساب/فيسبوك/تلغرام + فهرسة)
+#   cats/ID.html       الشيء نفسه لصفحة كل تصنيف
+#   sitemap.xml        كل ما سبق
+# Caddy يخدم cards/cats عند ?l=ID أو ?c=ID فقط، ويتراجع إلى index.html العادي إن لم يوجد الملف.
+gen, rel, port, host = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+SITE = 'https://' + host
+MAX_URLS = 45000
+
+
+def say(*a):
+    print(*a, flush=True)
+
+
+def write_atomic(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + '.tmp'
+    with open(tmp, 'wb') as f:
+        f.write(data)
+    os.replace(tmp, path)
+
+
+# ─── 1) sync من PostgREST المحلي ───
+req = urllib.request.Request('http://127.0.0.1:%s/rpc/sync' % port, data=b'{}', headers={'Content-Type': 'application/json'})
+try:
+    raw = urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=90).read()  # بلا وسيط: الخدمة محلية
+    data = json.loads(raw)
+except Exception as e:
+    say('تعذّر جلب sync: %s' % e)
+    sys.exit(1)
+items, cats, areas = data.get('items') or [], data.get('cats') or [], data.get('areas') or []
+if not data.get('full') or len(items) < 100 or not cats:
+    say('ردّ sync غير مكتمل (%d نشاطاً)؛ لم يتغير شيء' % len(items))
+    sys.exit(1)
+
+manifest_path = os.path.join(gen, '.manifest.json')
+try:
+    manifest = json.load(open(manifest_path, encoding='utf-8'))
+except (OSError, ValueError):
+    manifest = {'files': {}, 'count': 0}
+old_count = manifest.get('count', 0)
+write_atomic(os.path.join(gen, 'data', 'sync.json'), raw)
+
+# حارس: إن نقصت الأنشطة إلى أقل من نصفها لا نحذف صفحات (خلل مؤقت في القاعدة)
+allow_delete = not (old_count and len(items) < old_count * 0.5)
+
+# ─── 2) القالب: index.html للإصدار المعروض ───
+try:
+    tpl = open(os.path.join(rel, 'index.html'), encoding='utf-8').read()
+except OSError as e:
+    say('لا قالب index.html (%s)؛ كُتب sync.json فقط' % e)
+    sys.exit(0)
+
+E = lambda s: html.escape(str(s), quote=True)
+PATTERNS = {
+    'title': (r'<title>.*?</title>', lambda v: '<title>%s</title>' % E(v['title'])),
+    'desc': (r'<meta name="description" content="[^"]*">', lambda v: '<meta name="description" content="%s">' % E(v['desc'])),
+    'canon': (r'<link rel="canonical" href="[^"]*">', lambda v: '<link rel="canonical" href="%s">' % E(v['url'])),
+    'ogt': (r'<meta property="og:title" content="[^"]*">', lambda v: '<meta property="og:title" content="%s">' % E(v['title'])),
+    'ogd': (r'<meta property="og:description" content="[^"]*">', lambda v: '<meta property="og:description" content="%s">' % E(v['desc'])),
+    'ogu': (r'<meta property="og:url" content="[^"]*">', lambda v: '<meta property="og:url" content="%s">' % E(v['url'])),
+    'ogi': (r'<meta property="og:image:alt" content="[^"]*">', lambda v: '<meta property="og:image:alt" content="%s">' % E(v['title'])),
+    'ns': (r'<noscript>.*?</noscript>', lambda v: '<noscript>%s</noscript>' % v['noscript']),
+}
+for k, (pat, _) in PATTERNS.items():
+    if len(re.findall(pat, tpl, flags=re.S)) != 1:
+        say('تغيّر قالب index.html (%s)؛ كُتب sync.json فقط' % k)
+        sys.exit(0)
+
+
+def render(v, ld=None):
+    out = tpl
+    for k, (pat, fn) in PATTERNS.items():
+        out = re.sub(pat, lambda m, fn=fn: fn(v), out, count=1, flags=re.S)
+    if ld:
+        blob = json.dumps(ld, ensure_ascii=False, separators=(',', ':')).replace('<', '\\u003c')
+        out = out.replace('</head>', '<script type="application/ld+json">%s</script>\n</head>' % blob, 1)
+    return out.encode('utf-8')
+
+
+catname = {c['i']: c['n'] for c in cats}
+rural = {a['n'] for a in areas if a.get('r')}
+
+
+def trim(s, n):
+    s = re.sub(r'\s+', ' ', s or '').strip()
+    return s if len(s) <= n else s[: n - 1].rstrip() + '…'
+
+
+files = {}  # مسار نسبي ← بايتات
+urls = [SITE + '/', SITE + '/privacy/']
+
+# ─── 3) صفحات الأنشطة ───
+for it in items:
+    n = it['n']
+    phones = it.get('p') or []
+    cat = catname.get(it.get('c'), '')
+    where = it.get('a') or 'حماة'
+    parts = [cat, 'في ' + where]
+    if phones:
+        parts.append('الهاتف ' + phones[0])
+    if it.get('d'):
+        parts.append(it['d'])
+    desc = trim('%s — %s. اتصل أو راسل بلمسة واحدة من دليل حماة.' % (n, ' · '.join(p for p in parts if p)), 200)
+    url = '%s/?l=%d' % (SITE, it['i'])
+    ns = ('<article dir="rtl"><h1>%s</h1><p>%s%s</p>%s%s<p><a href="/">دليل حماة</a></p></article>' % (
+        E(n), E(cat), (' · ' + E(where)) if where else '',
+        ''.join('<p>الهاتف: <bdi dir="ltr">%s</bdi></p>' % E(p) for p in phones),
+        ('<p>العنوان: %s</p>' % E(it['d'])) if it.get('d') else ''))
+    ld = {'@context': 'https://schema.org', '@type': 'LocalBusiness', 'name': n, 'url': url,
+          'address': {'@type': 'PostalAddress', 'addressLocality': where, 'addressCountry': 'SY'}}
+    if it.get('d'):
+        ld['address']['streetAddress'] = it['d']
+    if phones:
+        ld['telephone'] = phones[0]
+    if it.get('y') and it.get('x'):
+        ld['geo'] = {'@type': 'GeoCoordinates', 'latitude': it['y'], 'longitude': it['x']}
+    if it.get('s') and re.match(r'^https?://', it['s']):
+        ld['sameAs'] = it['s']
+    v = {'title': '%s — دليل حماة' % n, 'desc': desc, 'url': url, 'noscript': ns}
+    files['cards/%d.html' % it['i']] = render(v, ld)
+    urls.append(url)
+
+# ─── 4) صفحات التصنيفات (نشاط المدينة وحده؛ الريف له بوابته) ───
+by_cat = {}
+for it in items:
+    if not (it.get('a') and it['a'] in rural):
+        by_cat.setdefault(it.get('c'), []).append(it)
+for cid, lst in by_cat.items():
+    name = catname.get(cid)
+    if not name or not lst:
+        continue
+    lst = sorted(lst, key=lambda i: (-(i.get('k') or 0), i['n']))
+    url = '%s/?c=%d' % (SITE, cid)
+    desc = trim('أرقام وعناوين %s في مدينة حماة (%d نشاطاً): ابحث واتصل أو راسل بلمسة واحدة.' % (name, len(lst)), 200)
+    ns = '<article dir="rtl"><h1>%s في حماة</h1><ul>%s</ul><p><a href="/">دليل حماة</a></p></article>' % (
+        E(name), ''.join('<li><a href="/?l=%d">%s</a>%s</li>' % (i['i'], E(i['n']), (' — <bdi dir="ltr">%s</bdi>' % E(i['p'][0])) if i.get('p') else '') for i in lst[:150]))
+    v = {'title': '%s في حماة — دليل حماة' % name, 'desc': desc, 'url': url, 'noscript': ns}
+    files['cats/%d.html' % cid] = render(v)
+    urls.append(url)
+
+# ─── 5) sitemap.xml ───
+sm = ['<?xml version="1.0" encoding="UTF-8"?>', '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+sm += ['  <url><loc>%s</loc></url>' % E(u) for u in urls[:MAX_URLS]]
+sm.append('</urlset>')
+files['sitemap.xml'] = ('\n'.join(sm) + '\n').encode('utf-8')
+
+# ─── 6) كتابة ما تغيّر فقط، وحذف ما لم يعد له نشاط ───
+old = manifest.get('files', {})
+new = {}
+wrote = 0
+for path, blob in files.items():
+    h = hashlib.sha1(blob).hexdigest()
+    new[path] = h
+    if old.get(path) != h or not os.path.exists(os.path.join(gen, path)):
+        write_atomic(os.path.join(gen, path), blob)
+        wrote += 1
+removed = 0
+if allow_delete:
+    for path in set(old) - set(new):
+        try:
+            os.unlink(os.path.join(gen, path))
+            removed += 1
+        except OSError:
+            pass
+else:
+    new.update({p: h for p, h in old.items() if p not in new})
+    say('انخفض عدد الأنشطة كثيراً (%d بعد %d)؛ لم تُحذف صفحات' % (len(items), old_count))
+write_atomic(manifest_path, json.dumps({'files': new, 'count': len(items)}).encode('utf-8'))
+say('الأنشطة %d · كُتب %d ملفاً · حُذف %d' % (len(items), wrote, removed))
+PY
+)
+
+cmd_gen() {
+  [ "${1:-}" = --quiet ] && QUIET=1
+  need_tools python3 flock
+  load_conf
+  [ -f "$BACKEND_FLAG" ] || { say "قاعدة السيرفر غير مفعّلة بعد (install-db)؛ لا توليد"; return 0; }
+  [ -d "$BASE/current" ] || die "لا إصدار معروض بعد"
+  mkdir -p "$GEN"
+  exec 8>>"$BASE/.gen.lock"
+  flock -n 8 || { say "التوليد يعمل الآن"; return 0; }
+  if [ "$(id -u)" -eq 0 ] && id "$SITE_USER" >/dev/null 2>&1; then
+    chown "$SITE_USER:$SITE_USER" "$GEN" "$BASE/.gen.lock"
+    runuser -u "$SITE_USER" -- python3 -I -c "$GEN_PY" "$GEN" "$BASE/current/" "$API_PORT" "$HOST"
+  else
+    python3 -I -c "$GEN_PY" "$GEN" "$BASE/current/" "$API_PORT" "$HOST"
   fi
 }
 
@@ -1876,6 +2176,7 @@ case ${1:-} in
   resume)   cmd_resume ;;
   rollback) cmd_rollback ;;
   status)   cmd_status ;;
+  gen)      shift; cmd_gen "$@" ;;
   install-db)  shift; cmd_install_db "$@" ;;
   backup)      shift; cmd_backup "$@" ;;
   db-restore)  shift; cmd_db_restore "$@" ;;

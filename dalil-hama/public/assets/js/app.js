@@ -95,6 +95,18 @@ function strip(data) {
   return { ...data, items: data.items.map(({ i, n, c, p, w, nw, a, d, m, g, y, x, s, e, t, f, v, k }) => ({ i, n, c, p, w, nw, a, d, m, g, y, x, s, e, t, f, v, k })) };
 }
 
+/** المزامنة الكاملة: ملف جاهز يولّده الخادم كل 10 دقائق (ETag فيصل 304 لمن عنده نسخة ولا تُشغَّل القاعدة)، وإلا الدالة مباشرة */
+async function fullSync() {
+  try {
+    const r = await fetch('/data/sync.json', { cache: 'no-cache' });
+    if (r.ok) {
+      const j = await r.json();
+      if (j && j.full && Array.isArray(j.items) && j.items.length > 100 && Array.isArray(j.cats) && j.now) return j;
+    }
+  } catch { /* الملف غير موجود بعد أو غير صالح: نرجع إلى الدالة */ }
+  return rpc('sync', {});
+}
+
 async function loadData() {
   let cached = await bigGet(CACHE_KEY);
   if (!cached) {
@@ -106,7 +118,7 @@ async function loadData() {
   try {
     const stale = !cached || !cached.fullAt || Date.now() - cached.fullAt > FULL_SYNC_EVERY;
     const since = stale ? null : new Date(new Date(cached.now).getTime() - 5 * 60000).toISOString();
-    const res = await rpc('sync', since ? { since } : {});
+    const res = since ? await rpc('sync', { since }) : await fullSync();
     let next;
     if (res.full) {
       next = { ...res, fullAt: Date.now() };
@@ -699,9 +711,10 @@ function removeSheetEls() {
   sheetEls = null;
 }
 
-const BASE_TITLE = document.title;
+// عنوان الدليل ووصفه الأصليان ثابتان: الخادم يخدم صفحة كل نشاط/تصنيف بعنوانها (معاينة الروابط) فلا يُؤخذ العنوان الافتراضي من الصفحة
+const BASE_TITLE = 'دليل حماة — أرقام وعناوين حماة بين يديك';
 const metaDesc = document.querySelector('meta[name="description"]');
-const BASE_DESC = metaDesc ? metaDesc.content : '';
+const BASE_DESC = 'دليل حماة: ابحث عن أرقام وعناوين العيادات والصيدليات والمشافي والمطاعم والمحلات والخدمات في مدينة حماة، واتصل أو راسل بلمسة واحدة.';
 let pageTitle = BASE_TITLE;
 
 /** عنوان التبويب والوصف يتبعان الشاشة: «صيدليات في حماة — دليل حماة»، «ريف حماة · سلمية»، «نتائج «…»» */
