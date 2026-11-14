@@ -1,4 +1,4 @@
-// دليل حماة — صفحة صاحب الرقم (/r/#رمز): «موافق، انشروا» أو «الرقم خطأ / لا أريد النشر» من رابط رسالة الموافقة (migration 0012).
+// دليل حماة — صفحة صاحب الرقم (/r/#رمز): «موافق، انشروا» أو تعديل أو إبلاغ أو حذف رقمه وحده أو بطاقته كاملة (migrations 0012 و0014 و0019).
 // الرمز بعد # فلا يصل إلى سجلات الخادم، ولا يتغير شيء إلا بضغط زر.
 import { rpc, esc, formatPhone } from './core.js';
 
@@ -21,6 +21,7 @@ const ERR = {
   details: 'اكتبوا رسالة أوضح (5 أحرف على الأقل).',
 };
 let info = null;
+let delMode = 'phone'; // phone: رقمه وحده (تبقى البطاقة إن بقي فيها رقم) | card: البطاقة كاملة
 
 const state = (big, title, text, extra = '') => {
   box.innerHTML = `<div class="o-state"><div class="o-big" aria-hidden="true">${big}</div><h2>${title}</h2><p>${text}</p>${extra}</div>`;
@@ -37,23 +38,39 @@ function head() {
 const tools = () => `<div class="o-acts">
       <button class="btn btn-soft btn-lg" type="button" data-act="edit">✏️ تعديل البيانات</button>
       <button class="btn btn-soft btn-lg" type="button" data-act="report">🚩 إبلاغ برسالة</button>
-      <button class="btn btn-soft btn-lg" type="button" data-act="ask-reject">🗑 حذف البطاقة</button></div>`;
+      ${info.others > 0
+    ? `<button class="btn btn-soft btn-lg" type="button" data-act="ask-reject-phone">🗑 الرقم خطأ — احذفوا هذا الرقم فقط</button>
+      <button class="btn btn-soft btn-lg" type="button" data-act="ask-reject-card">🗑 حذف البطاقة كاملة</button>`
+    : '<button class="btn btn-soft btn-lg" type="button" data-act="ask-reject-phone">🗑 الرقم خطأ / حذف البطاقة</button>'}</div>`;
 
 function render() {
   if (info.action === 'reject') {
-    state('✅', 'حُذفت البطاقة من الدليل', 'لن يُضاف هذا الرقم إلى الدليل مرة أخرى. نعتذر عن الإزعاج، وشكراً لكم 🌿');
+    if (info.card_live) state('✅', 'حُذف رقمكم من الدليل', `لن يُضاف هذا الرقم إلى الدليل مرة أخرى، وتبقى بطاقة «${esc(info.name)}» بأرقامها الأخرى. نعتذر عن الإزعاج، وشكراً لكم 🌿`);
+    else state('✅', 'حُذفت البطاقة من الدليل', 'لن يُضاف هذا الرقم إلى الدليل مرة أخرى. نعتذر عن الإزعاج، وشكراً لكم 🌿');
     return;
   }
-  box.innerHTML = `${head()}${info.address ? `<p class="o-addr">📍 ${esc(info.address)}</p>` : ''}
-    <p>حصلنا على رقمكم باسم «${esc(info.name)}» من تطبيق «دليل حماة»، الدليل الإلكتروني المجاني لأهل المدينة. فإن كان الرقم أو أي معلومة خاطئة أو تغيّرت، فعدّلوها أو احذفوا البطاقة أو أبلغونا برسالة.</p>
+  const pending = !info.published && info.action !== 'approve';
+  const thanks = info.action === 'approve' ? '<p class="o-note" style="margin:0 0 14px">🌿 شكراً لكم، تمت الموافقة وصار نشاطكم في الدليل. وتستطيعون تعديل بطاقتكم أو حذفها في أي وقت من هذا الرابط.</p>' : '';
+  box.innerHTML = `${head()}${info.address ? `<p class="o-addr">📍 ${esc(info.address)}</p>` : ''}${thanks}
+    ${pending
+    ? `<p>هل توافقون على ظهور هذا النشاط ورقمه في «دليل حماة»، الدليل الإلكتروني المجاني لأهل المدينة؟ لا يُنشر شيء دون موافقتكم.</p>
+       <div class="o-acts" style="margin-bottom:12px"><button class="btn btn-primary btn-lg" type="button" data-act="approve">✅ موافق، انشروا</button></div>
+       <p class="o-note" style="margin:0 0 12px">وإن كان الرقم أو أي معلومة خاطئة فاختاروا من الأزرار التالية:</p>`
+    : `<p>حصلنا على رقمكم باسم «${esc(info.name)}» من تطبيق «دليل حماة»، الدليل الإلكتروني المجاني لأهل المدينة. فإن كان الرقم أو أي معلومة خاطئة أو تغيّرت، فعدّلوها أو احذفوا الرقم أو أبلغونا برسالة.</p>`}
     ${tools()}
     ${info.published ? `<div class="o-acts" style="margin-top:10px"><a class="btn btn-soft" href="/?l=${info.id}">عرض البطاقة في الدليل</a></div>` : ''}`;
 }
 
 function askReject() {
-  box.innerHTML = `${info.action === 'approve' || info.published ? '<h1>حذف البطاقة من الدليل</h1>' : head()}
-    <div class="o-confirm"><p>ستُحذف بطاقة «${esc(info.name)}» والرقم <bdi dir="ltr">${esc(formatPhone(info.phone))}</bdi> من «دليل حماة» ولن يُضاف مرة أخرى. هل أنتم متأكدون؟</p>
-      <div class="o-acts"><button class="btn o-danger btn-lg" type="button" data-act="reject">نعم، احذفوا البطاقة</button>
+  const card = delMode === 'card' || !(info.others > 0);
+  const num = `<bdi dir="ltr">${esc(formatPhone(info.phone))}</bdi>`;
+  box.innerHTML = `${info.action === 'approve' || info.published ? '<h1>حذف من الدليل</h1>' : head()}
+    <div class="o-confirm"><p>${delMode === 'card' && info.others > 0
+    ? `ستُحذف بطاقة «${esc(info.name)}» بكل أرقامها ولن يُضاف الرقم ${num} مرة أخرى. هل أنتم متأكدون؟`
+    : card
+      ? `سيُحذف الرقم ${num} من «دليل حماة» ولن يُضاف مرة أخرى${info.published ? '، وبما أنه رقمها الوحيد ستُحذف البطاقة' : ''}. هل أنتم متأكدون؟`
+      : `سيُحذف الرقم ${num} وحده من بطاقة «${esc(info.name)}» ولن يُضاف مرة أخرى، وتبقى بقية أرقامها. هل أنتم متأكدون؟`}</p>
+      <div class="o-acts"><button class="btn o-danger btn-lg" type="button" data-act="reject">${delMode === 'card' && info.others > 0 ? 'نعم، احذفوا البطاقة' : 'نعم، احذفوا الرقم'}</button>
       <button class="btn btn-soft" type="button" data-act="back">رجوع</button></div></div>`;
 }
 
@@ -82,9 +99,11 @@ function reportForm() {
 async function act(action, btn) {
   if (btn) btn.disabled = true;
   try {
-    const r = action === 'reject' ? await rpc('owner_delete', { p_token: token }) : await rpc('owner_action', { p_token: token, p_action: action });
+    const r = action === 'reject' ? await rpc('owner_delete', { p_token: token, p_card: delMode === 'card' }) : await rpc('owner_action', { p_token: token, p_action: action });
     if (!r || !r.ok) { fail(r && r.error); return; }
     info.action = r.action;
+    if (r.card_live !== undefined) info.card_live = r.card_live;
+    if (r.action === 'approve') info.published = true;
     render();
   } catch {
     if (btn) btn.disabled = false;
@@ -111,7 +130,8 @@ box.addEventListener('click', (e) => {
   if (!b) return;
   const a = b.dataset.act;
   if (a === 'approve') act('approve', b);
-  else if (a === 'ask-reject') askReject();
+  else if (a === 'ask-reject-phone') { delMode = 'phone'; askReject(); }
+  else if (a === 'ask-reject-card') { delMode = 'card'; askReject(); }
   else if (a === 'reject') act('reject', b);
   else if (a === 'back') render();
   else if (a === 'edit') editForm();

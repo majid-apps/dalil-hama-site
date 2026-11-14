@@ -12,8 +12,9 @@ const CACHE_KEY = 'dh:data:v1';
 const FULL_SYNC_EVERY = 7 * 24 * 3600 * 1000;
 const PAGE = 36;
 /** رسالة واتساب التي يبدأ بها الزائر محادثته مع النشاط: قصيرة وودّية يكمل الزائر كتابتها.
+ *  آخر سطر لمن وصلته الرسالة بالخطأ (رقم خاطئ): رابط يفتح البطاقة مع زر «الرقم خطأ — يرجى حذف» (?w=1).
  *  رسالة «إشعار صاحب الرقم» الكاملة (الأرقام والعنوان ورابط التعديل أو الحذف) تُرسل من لوحة الإدارة وحدها. */
-const waMsg = (it) => `السلام عليكم، وجدت «${it.n}» في دليل حماة 🌿\n`;
+const waMsg = (it) => `السلام عليكم، وجدت «${it.n}» في دليل حماة 🌿\n\n(وصلتكم بالخطأ؟ احذفوا رقمكم من هنا: ${location.origin}/?l=${it.i}&w=1)\n`;
 
 const QUICK = [
   ['صيدليات', 'صيدليات'], ['عيادات وأطباء', 'أطباء'], ['مستشفيات', 'مشافي'], ['عيادات أسنان', 'أسنان'],
@@ -402,7 +403,7 @@ function renderHome() {
   const emergency = state.settings.emergency || [];
   const cats = [...state.cats].filter((c) => state.counts.get(c.i)).sort((a, b) => (state.counts.get(b.i) || 0) - (state.counts.get(a.i) || 0));
   const featured = state.city.filter((it) => it.f).slice(0, 9);
-  const popular = state.city.filter((it) => it.k).sort((a, b) => b.k - a.k).slice(0, 6);
+  const popular = state.city.filter((it) => it.k >= 3).sort((a, b) => b.k - a.k).slice(0, 6);
   const newest = [...state.city].sort((a, b) => b.i - a.i).slice(0, 6);
   const recent = state.recent.map((id) => state.byId.get(id)).filter(Boolean).slice(0, 6);
   const areas = state.areas.filter((a) => state.areaCounts.get(a.n)).sort((a, b) => state.areaCounts.get(b.n) - state.areaCounts.get(a.n));
@@ -536,6 +537,12 @@ function renderList(p, mode) {
     const rr = state.index.search(p.q, { cat: p.c, scope: 'rural', noFuzzy: true }).results.length;
     if (rr) sug.push(`<a href="/?v=rural&q=${encodeURIComponent(p.q)}${p.c ? `&c=${p.c}` : ''}">🌾 ${fmtNum(rr)} نتيجة في ريف حماة</a>`);
   }
+  // اسم بلدة ريفية بحرفه («سلمية»): عرض بوابتها أولاً بدل نتائج المدينة المتشابهة بالاسم
+  if (mode === 'search' && p.q && !p.a) {
+    const qn = normalize(p.q).replace(/^(حي|بلده|مدينه)\s+/, '');
+    const town = [...state.ruralNames].find((n) => normalize(n) === qn && state.ruralAreaCounts.get(n));
+    if (town) extra += `<a class="portal" href="${areaHref(town)}" data-nav="rural"><span class="em" aria-hidden="true">🌾</span><span class="txt"><b>${esc(town)} — ريف حماة</b><small>${fmtNum(state.ruralAreaCounts.get(town))} نشاطاً · عرض كل أنشطتها</small></span>${I('chev')}</a>`;
+  }
   if (sug.length) extra += `<div class="cat-suggest">${sug.join('')}</div>`;
   if (res.fuzzy && list.length) extra += `<p class="notice">لم نجد تطابقاً تاماً، إليك أقرب النتائج:</p>`;
   if (res.phone) extra += `<p class="notice">نتائج البحث بالرقم:</p>`;
@@ -545,7 +552,7 @@ function renderList(p, mode) {
   if (sos.length) extra = sosHtml(sos, true) + extra;
 
   view.innerHTML = `<div class="results-head">
-      <div class="results-title"><a class="back" href="/" data-act="back" aria-label="رجوع">${I('back')}</a><h2>${title}</h2><span class="count">${fmtNum(list.length)} نتيجة</span></div>
+      <div class="results-title"><a class="back" href="/" data-act="back" aria-label="رجوع">${I('back')}</a><h2>${title}</h2>${mode === 'near' && !state.geo ? '' : `<span class="count">${fmtNum(list.length)} نتيجة</span>`}</div>
       ${filters}
     </div>
     ${extra}
@@ -1061,13 +1068,22 @@ document.addEventListener('click', (e) => {
     return;
   }
   if (actName === 'rmnum' && it) {
-    // لا يتغير شيء في البطاقة من هنا: الإثبات رسالة واتساب تصل المدير من رقم صاحب الرقم نفسه
+    // يُسجَّل بلاغ «الرقم خطأ» فوراً في القاعدة (وقد يُوقَف الرقم مؤقتاً عن الزوار)، ثم رسالة واتساب جاهزة من الرقم نفسه تُثبت الملكية
     e.preventDefault();
     const ph = act.dataset.ph;
     const wa = (state.settings.contact || {}).whatsapp;
-    const msg = `الرقم خطأ، يرجى حذف الرقم ${formatPhone(ph)} من بطاقة «${it.n}» (#${it.i})`;
+    const msg = `الرقم خطأ، يرجى حذف الرقم ${formatPhone(ph)} من بطاقة «${it.n}» (#${it.i})\n${location.origin}/admin/#rm?l=${it.i}&p=${ph}`;
     const ob = act.closest('.owner-box');
-    if (ob) ob.innerHTML = `<p><b>خطوة أخيرة لحذف الرقم 🗑</b><br>اضغطوا الزر لإرسال الرسالة الجاهزة من واتساب هذا الرقم. وصولها من رقمكم يثبت أنكم أصحابه، فنحذفه فوراً.</p>${wa ? `<a class="btn btn-wa btn-block" href="${waHref(wa, msg)}" target="_blank" rel="noopener">${I('wa', 'sm')}أرسل طلب الحذف عبر واتساب</a>` : '<p>تعذّر تحديد رقم التواصل، استعملوا «إبلاغ».</p>'}`;
+    if (ob) {
+      ob.innerHTML = '<p>جارٍ تسجيل طلبكم…</p>';
+      rpc('flag_phone', { p_listing: it.i, p_phone: ph }).catch(() => null).then((r) => {
+        const head = r && r.ok
+          ? `<b>✅ سجّلنا طلب حذف الرقم <bdi dir="ltr">${esc(formatPhone(ph))}</bdi></b><br>${r.held ? 'وأخفيناه مؤقتاً عن الزوار إلى أن نراجعه. ' : ''}سنراجعه ونحذفه بأقرب وقت.`
+          : `<b>🗑 طلب حذف الرقم <bdi dir="ltr">${esc(formatPhone(ph))}</bdi></b><br>${r && r.error === 'rate' ? 'تجاوزتم الحد اليومي للطلبات، لكن يمكنكم إرسال الرسالة التالية.' : 'تعذّر تسجيل الطلب تلقائياً، أرسلوه بالرسالة التالية.'}`;
+        ob.innerHTML = `<p>${head}</p>
+          <p>لتسريع الحذف اضغطوا الزر لإرسال رسالة جاهزة من واتساب هذا الرقم؛ وصولها من رقمكم يثبت أنكم أصحابه فنحذفه فوراً. (اختياري)</p>${wa ? `<a class="btn btn-wa btn-block" href="${waHref(wa, msg)}" target="_blank" rel="noopener">${I('wa', 'sm')}أرسل طلب الحذف عبر واتساب</a>` : ''}`;
+      });
+    }
     return;
   }
   if (actName === 'addphone') { e.preventDefault(); go({ l: null, hash: `addphone-${id}` }, { keep: true, push: !history.state?.sheet }); return; }
