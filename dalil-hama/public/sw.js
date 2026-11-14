@@ -1,10 +1,10 @@
 // عامل الخدمة: يجعل الدليل يعمل بسرعة وحتى دون إنترنت بعد أول زيارة.
-const VERSION = 'dh-v41';
+const VERSION = 'dh-v42';
 const SHELL = [
   '/',
   '/assets/css/app.css?v=11',
   '/assets/js/theme.js?v=3',
-  '/assets/js/app.js?v=20',
+  '/assets/js/app.js?v=21',
   '/assets/js/core.js',
   '/assets/js/search.js',
   '/assets/js/config.js',
@@ -52,7 +52,7 @@ self.addEventListener('fetch', (e) => {
         .then((res) => {
           // لا يُحفظ كواجهة للعمل دون اتصال إلا الصفحة الرئيسية السليمة
           const html = (res.headers.get('content-type') || '').includes('text/html');
-          if (res.ok && html && (url.pathname === '/' || url.pathname === '/index.html')) {
+          if (res.ok && html && !url.search && (url.pathname === '/' || url.pathname === '/index.html')) {
             const copy = res.clone();
             caches.open(VERSION).then((c) => c.put('/', copy));
           }
