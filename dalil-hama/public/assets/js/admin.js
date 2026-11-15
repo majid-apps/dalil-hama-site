@@ -17,7 +17,7 @@ const oddOk = (note) => String(note || '').includes(ODD_OK);
 const oddPhone = (r) => !oddOk(r.admin_note) && (r.phones || []).some((p) => !/^0\d{9}$/.test(p));
 
 const STATUS = { approved: 'منشور', pending: 'قيد المراجعة', hidden: 'مخفي', rejected: 'مرفوض' };
-const REPORT_KIND = { wrong_number: 'رقم خاطئ', wrong_info: 'معلومات ناقصة/خاطئة', closed: 'مغلق نهائياً', removal: 'طلب حذف', abuse: 'إزعاج أو احتيال', other: 'أخرى' };
+const REPORT_KIND = { wrong_number: 'رقم خاطئ', wrong_info: 'معلومات ناقصة/خاطئة', closed: 'مغلق نهائياً', removal: 'طلب حذف', abuse: 'إزعاج أو احتيال', other: 'أخرى', owner_ok: '✅ موافقة صاحب الرقم — للتوثيق', owner_edit: '✏️ طلب تعديل من صاحب الرقم' };
 const REPORT_STATUS = { open: 'مفتوح', resolved: 'تمت المعالجة', dismissed: 'مُتجاهل' };
 const FIELD_LABEL = {
   name: 'الاسم', category_id: 'التصنيف', phones: 'الأرقام', area: 'الحي', address: 'العنوان', map_url: 'رابط الخريطة', lat: 'خط العرض', lng: 'خط الطول',
@@ -1441,8 +1441,9 @@ function viewReports(el) {
       ${r.details ? `<div style="white-space:pre-wrap;background:var(--surface-2);border-radius:12px;padding:10px 12px">${esc(r.details)}</div>` : ''}
       ${r.contact ? `<div class="muted" style="font-size:13.5px">للتواصل مع المُبلِّغ: <bdi dir="ltr">${esc(r.contact)}</bdi></div>` : ''}
       <div class="ops">
+        ${r.status === 'open' && r.kind === 'owner_ok' && r.phone && l && (l.phones || []).includes(r.phone) ? `<button class="btn btn-primary" data-verify="${r.id}">${I('verified', 'sm')}توثيق${l.verified ? ' (موثّق أصلاً)' : ''}</button>` : ''}
         ${r.status === 'open' && r.phone && l && (l.phones || []).includes(r.phone) ? `<button class="btn btn-danger" data-rmphone="${r.id}">${I('trash', 'sm')}حذف الرقم <bdi dir="ltr">${esc(formatPhone(r.phone))}</bdi></button>` : ''}
-        ${r.status === 'open' && r.phone ? `<button class="btn btn-soft" data-okphone="${r.id}">${I('check', 'sm')}الرقم صحيح</button>` : ''}
+        ${r.status === 'open' && r.phone && r.kind === 'wrong_number' ? `<button class="btn btn-soft" data-okphone="${r.id}">${I('check', 'sm')}الرقم صحيح</button>` : ''}
         ${r.contact && /^[+\d][\d\s+-]{6,}$/.test(r.contact) ? `<a class="btn btn-wa" href="${waHref(normalizePhone(r.contact), `السلام عليكم، وصلنا بلاغكم عن «${r.listing_name || 'نشاط'}» في دليل حماة 🌿`)}" target="_blank" rel="noopener">${I('wa', 'sm')}ردّ على المبلِّغ</a>` : ''}
         ${l ? `<button class="btn btn-soft" data-edit="${l.id}">${I('edit', 'sm')}تعديل النشاط</button>` : ''}
         ${l && l.status === 'approved' ? `<button class="btn btn-soft" data-hide="${l.id}" data-rid="${r.id}">${I('eye-off', 'sm')}إخفاء النشاط</button>` : ''}
@@ -1457,6 +1458,24 @@ function viewReports(el) {
     const hide = e.target.closest('[data-hide]');
     const rmp = e.target.closest('[data-rmphone]');
     const okp = e.target.closest('[data-okphone]');
+    const vf = e.target.closest('[data-verify]');
+    if (vf) {
+      // «توثيق» (migration 0021): verified = true، الرقم مؤكَّد 30 يوماً، ويُغلق بلاغ الموافقة؛ فتعود رسالة الزائر قصيرة
+      const rp = A.reports.find((x) => x.id === Number(vf.dataset.verify));
+      if (!rp || !rp.phone) return;
+      vf.disabled = true;
+      try {
+        await rpc('admin_verify_phone', { p_listing: rp.listing_id, p_phone: rp.phone });
+        const [rows, reps] = await Promise.all([rest(`listings?select=*&id=eq.${rp.listing_id}`), rest(reportsQuery())]);
+        upsertMany(rows);
+        A.reports = reps;
+        toast('وُثّق النشاط ✓');
+        refreshStats();
+        renderNavCounts();
+        viewReports(el);
+      } catch (err) { vf.disabled = false; toast(`لم يكتمل: ${errMsg(err)}`, true); }
+      return;
+    }
     if (rmp || okp) {
       const rep0 = A.reports.find((x) => x.id === Number((rmp || okp).dataset.rmphone || (rmp || okp).dataset.okphone));
       if (rep0 && rep0.phone) phoneAction(rep0.phone, rmp ? 'delete' : 'ok', rep0.listing_id, () => viewReports(el));
