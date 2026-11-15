@@ -620,7 +620,9 @@ async function start() {
 const catName = (id) => (A.catById.get(id) || {}).name || 'بلا تصنيف';
 const catIcon = (id) => esc((A.catById.get(id) || {}).icon || '📍');
 const catHue = (id) => { const c = A.catById.get(id); return c ? (c.sort * 4.7 + c.id * 31) % 360 : 170; };
-const isLatinName = (r) => /[A-Za-z]/.test(r.name || '') && !/[\u0600-\u06FF]/.test(r.name || '');
+// اسم لاتيني فقط ويحتاج اسماً عربياً للبحث: من أُضيف له وسم عربي (نطق/ترجمة) لم يعد يُعدّ ناقصاً
+const hasArabic = (t) => /[\u0600-\u06FF]/.test(t || '');
+const isLatinName = (r) => /[A-Za-z]/.test(r.name || '') && !hasArabic(r.name) && !(r.tags || []).some(hasArabic);
 const phonesHtml = (r) => (r.phones || []).map((p) => `<bdi dir="ltr">${esc(formatPhone(p))}</bdi>`).join(' · ') || '<span style="color:var(--danger)">بلا رقم</span>';
 const st = (s, map = STATUS) => `<span class="st ${s}">${map[s] || s}</span>`;
 const fmtDate = (d) => new Date(d).toLocaleString('ar-SY', { dateStyle: 'medium', timeStyle: 'short' });
