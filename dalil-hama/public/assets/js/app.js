@@ -13,10 +13,22 @@ const FULL_SYNC_EVERY = 7 * 24 * 3600 * 1000;
 const PAGE = 36;
 /** أقل عدد تواصلات (اتصال + واتساب) لدخول «الأكثر تواصلاً»: بعتبة صغيرة تظهر أولاً أنشطة قليلة الإحصاء فيبدو القسم انحيازاً */
 const POPULAR_MIN = 10;
-/** رسالة واتساب التي يبدأ بها الزائر محادثته مع النشاط: قصيرة وودّية يكمل الزائر كتابتها.
- *  آخر سطر لمن وصلته الرسالة بالخطأ (رقم خاطئ): رابط يفتح البطاقة مع زر «الرقم خطأ — يرجى حذف» (?w=1).
- *  رسالة «إشعار صاحب الرقم» الكاملة (الأرقام والعنوان ورابط التعديل أو الحذف) تُرسل من لوحة الإدارة وحدها. */
-const waMsg = (it) => `السلام عليكم، وجدت «${it.n}» في دليل حماة 🌿\n\n(وصلتكم بالخطأ؟ احذفوا رقمكم من هنا: ${location.origin}/?l=${it.i}&w=1)\n`;
+/** رسالة واتساب التي يبدأ بها الزائر محادثته مع النشاط (v1.13.0).
+ *  النشاط غير الموثّق (it.v): رسالة توثيق (السلام، رابط الدليل، الاسم والتصنيف والعنوان والموقع، «هل أنتم موافقون على النشر؟»)
+ *  ورابطها /?l=ID&w=1#p=الرقم يفتح نافذة بثلاثة خيارات لمن وصلته الرسالة (صاحب الرقم حكماً) وللرقم نفسه وحده:
+ *  موافق وتوثيق، تعديل، الرقم خطأ (حذف نهائي). كل خيار إشارة إلى الإدارة فتقرّر؛ لا يتغير شيء من الرابط مباشرة.
+ *  الرقم في ما بعد # لا في الاستعلام: Caddy يخدم الصفحة الثابتة عند ?l=ID&w=1 فقط (معاينة الرابط)، ولا يصل # إلى الخادم.
+ *  النشاط الموثّق: رسالة قصيرة وودّية يكمل الزائر كتابتها، وسطر أخير لمن وصلته بالخطأ (الرابط نفسه). */
+const waMsg = (it, ph = '') => {
+  const link = `${location.origin}/?l=${it.i}&w=1${ph ? `#p=${ph}` : ''}`;
+  if (it.v) return `السلام عليكم، وجدت «${it.n}» في دليل حماة 🌿\n\n(وصلتكم بالخطأ؟ احذفوا رقمكم من هنا: ${link})\n`;
+  const cat = state.catById.get(it.c);
+  const map = mapHref(it);
+  return `السلام عليكم ورحمة الله 🌿\n${location.origin}\nبرنامج «دليل حماة» يسهّل البحث والاتصال بأنشطة حماة.\n\n`
+    + `وجدنا هذا الرقم باسم: «${it.n}»${cat ? ` — ${cat.n}` : ''}\n`
+    + `${it.d || it.a ? `العنوان: ${it.d || `حماة، ${it.a}`}\n` : ''}${map ? `الموقع: ${map}\n` : ''}`
+    + `\nهل أنتم موافقون على النشر؟ اختاروا من هذا الرابط:\n✅ موافق وتوثيق · ✏️ تعديل · ❌ الرقم خطأ (حذف نهائي)\n${link}\n`;
+};
 
 const QUICK = [
   ['صيدليات', 'صيدليات'], ['عيادات وأطباء', 'أطباء'], ['مستشفيات', 'مشافي'], ['عيادات أسنان', 'أسنان'],
@@ -347,7 +359,7 @@ function card(it, terms = []) {
     <div class="actions">
       ${phone ? `<a class="btn btn-primary call" href="${telHref(phone)}" data-act="call" aria-label="اتصال">${I('phone', 'sm')}اتصال</a>`
     : `<div class="no-phone"><span>بلا رقم</span><button type="button" data-act="addphone">أضف الرقم</button></div>`}
-      ${wa ? `<a class="btn btn-wa wa" href="${waHref(wa, waMsg(it))}" target="_blank" rel="noopener" data-act="whatsapp">${I('wa', 'sm')}واتساب</a>` : ''}
+      ${wa ? `<a class="btn btn-wa wa" href="${waHref(wa, waMsg(it, wa))}" target="_blank" rel="noopener" data-act="whatsapp">${I('wa', 'sm')}واتساب</a>` : ''}
       ${map ? `<a class="btn btn-soft map" href="${esc(map)}" target="_blank" rel="noopener" data-act="map">${I('pin', 'sm')}الموقع</a>` : ''}
       <button class="btn btn-soft share" type="button" data-act="share" aria-label="مشاركة">${I('share', 'sm')}</button>
       ${adminOn() ? `<a class="btn btn-soft" href="/admin/#edit/${it.i}" aria-label="تعديل في الإدارة" title="تعديل في الإدارة">${I('edit', 'sm')}</a>` : ''}
@@ -786,6 +798,84 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// ─────────────── نافذة «وصلتكم رسالة من الدليل؟» (/?l=ID&w=1#p=الرقم) ───────────────
+
+/** صندوق صاحب الرقم فوق البطاقة: ثلاثة خيارات للرقم الذي وصلته الرسالة وحده (موافق وتوثيق، تعديل، الرقم خطأ).
+ *  بلا رقم في الرابط (رسائل قديمة أو رقم غير موجود) وفي البطاقة أكثر من رقم: يختار الزائر رقمه أولاً. */
+function ownerBoxHtml(it, ph) {
+  const phones = it.p || [];
+  if (!phones.length) return '';
+  const sel = phones.includes(ph) ? ph : phones.length === 1 ? phones[0] : '';
+  if (!sel) {
+    return `<div class="owner-box" data-ob="1"><p><b>وصلتكم رسالة من «دليل حماة»؟</b> اختاروا الرقم الذي وصلته الرسالة:</p>
+      ${phones.map((p) => `<button class="btn btn-soft btn-block" type="button" data-act="ob-pick" data-ph="${esc(p)}"><bdi dir="ltr">${esc(formatPhone(p))}</bdi></button>`).join('')}</div>`;
+  }
+  const cat = catOf(it);
+  const only = phones.length === 1;
+  return `<div class="owner-box" data-ob="1" data-ph="${esc(sel)}">
+    <p><b>وصلتكم رسالة من «دليل حماة»؟</b></p>
+    <p>وجدنا الرقم <bdi dir="ltr">${esc(formatPhone(sel))}</bdi> باسم «${esc(it.n)}»${cat ? ` (${esc(cat.n)})` : ''}${it.d ? `، العنوان: ${esc(it.d)}` : it.a ? `، ${esc(it.a)}` : ''}. هل أنتم موافقون على نشره في الدليل؟</p>
+    <button class="btn btn-primary btn-lg btn-block" type="button" data-act="ob-ok">${I('check', 'sm')}موافق — انشروا ووثّقوا</button>
+    <button class="btn btn-soft btn-block" type="button" data-act="ob-edit">${I('edit', 'sm')}تعديل البيانات</button>
+    <button class="btn btn-danger btn-block" type="button" data-act="ob-del">${I('x', 'sm')}الرقم خطأ — احذفوه نهائياً</button>
+    <p class="ob-note">الخيارات لهذا الرقم وحده${only ? '، وهو الرقم الوحيد في البطاقة فحذفه يحذفها' : '، وتبقى بقية أرقام البطاقة'}. تراجع الإدارة كل طلب قبل اعتماده.</p>
+  </div>`;
+}
+
+function ownerBoxState(ob, big, title, text, extra = '') {
+  ob.innerHTML = `<div class="ob-state"><div class="big" aria-hidden="true">${big}</div><p><b>${title}</b></p><p>${text}</p>${extra}</div>`;
+}
+
+const OB_ERR = {
+  rate: 'تجاوزتم الحد اليومي للطلبات من هذا الاتصال. حاولوا غداً أو راسلونا من «إبلاغ».',
+  gone: 'هذا النشاط لم يعد منشوراً في الدليل.',
+  phone_gone: 'هذا الرقم لم يعد في البطاقة، فلا يلزم شيء.',
+  details: 'اكتبوا ما تريدون تعديله.',
+};
+
+/** إشارة صاحب الرقم إلى الإدارة (owner_signal، migration 0021): approve أو edit. لا تغيّر البطاقة؛ الإدارة تقرّر. */
+async function ownerSignal(ob, it, ph, kind, text) {
+  ob.innerHTML = '<p>جارٍ الإرسال…</p>';
+  let r = null;
+  try { r = await rpc('owner_signal', { p_listing: it.i, p_phone: ph, p_kind: kind, p_text: text || null }); } catch { r = null; }
+  if (!r || !r.ok) {
+    ownerBoxState(ob, '⚠️', 'تعذّر الإرسال', OB_ERR[r && r.error] || 'تعذّر الاتصال. تحققوا من الإنترنت وحاولوا مجدداً.',
+      `<button class="btn btn-soft btn-block" type="button" data-act="ob-back">رجوع</button>`);
+    return;
+  }
+  if (kind === 'approve') {
+    ownerBoxState(ob, '✅', r.dup ? 'وصلت موافقتكم من قبل' : 'شكراً لكم، وصلت موافقتكم 🌿',
+      `سيوثّق الدليل الرقم <bdi dir="ltr">${esc(formatPhone(ph))}</bdi> ونشاط «${esc(it.n)}» بعد مراجعة الإدارة، وتظهر عليه علامة «موثّق».`);
+  } else {
+    ownerBoxState(ob, '✏️', r.dup ? 'طلب التعديل وصل من قبل' : 'وصل طلب التعديل، شكراً لكم 🌿', 'ستراجعه الإدارة وتحدّث البطاقة بأقرب وقت.');
+  }
+}
+
+function ownerEditForm(ob, it, ph) {
+  ob.innerHTML = `<p><b>تعديل بيانات «${esc(it.n)}»</b></p>
+    <form id="ob-edit" novalidate>
+      <label class="field"><span>اسم النشاط</span><input class="input" name="name" maxlength="160" value="${esc(it.n)}"></label>
+      <label class="field"><span>الرقم</span><input class="input" name="phone" inputmode="tel" dir="ltr" maxlength="20" value="${esc(ph)}"></label>
+      <label class="field"><span>العنوان</span><input class="input" name="address" maxlength="400" value="${esc(it.d || '')}" placeholder="الحي، الشارع، بجانب…"></label>
+      <label class="field"><span>ملاحظة <em>(اختياري)</em></span><textarea class="input" name="note" maxlength="500" rows="2" placeholder="مثال: الاسم الصحيح… / رقم إضافي… / تغيّر العنوان إلى…"></textarea></label>
+      <div class="form-error" hidden></div>
+      <button class="btn btn-primary btn-lg btn-block" type="submit">${I('check', 'sm')}إرسال التعديل</button>
+      <button class="btn btn-soft btn-block" type="button" data-act="ob-back">رجوع</button>
+    </form>`;
+  ob.querySelector('input[name=name]').focus();
+}
+
+/** نص طلب التعديل: ما تغيّر فقط، والملاحظة. يصل إلى «البلاغات» بنوع owner_edit */
+function ownerEditText(it, ph, fd) {
+  const v = (k) => String(fd.get(k) || '').replace(/\s+/g, ' ').trim();
+  const lines = [];
+  if (v('name') && v('name') !== it.n) lines.push(`الاسم: ${it.n} ← ${v('name')}`);
+  if (v('phone') && normalizePhone(v('phone')) !== ph) lines.push(`الرقم: ${ph} ← ${normalizePhone(v('phone'))}`);
+  if (v('address') !== (it.d || '')) lines.push(`العنوان: ${it.d || '—'} ← ${v('address') || '—'}`);
+  if (v('note')) lines.push(`ملاحظة: ${v('note')}`);
+  return lines.join('\n');
+}
+
 // تفاصيل النشاط
 function openItem(id) {
   const it = state.byId.get(id);
@@ -801,15 +891,13 @@ function openItem(id) {
   const phones = (it.p || []).map((p, i) => `<div class="phone-row">
       <div class="num"><bdi dir="ltr">${esc(formatPhone(p))}</bdi><span class="kind">${isMobile(p) ? 'جوال' : 'أرضي'}${i === 0 ? ' · الرقم الأساسي' : ''}</span></div>
       <button class="icon-btn" type="button" data-act="copy" data-val="${esc(p)}" aria-label="نسخ الرقم">${I('copy', 'sm')}</button>
-      ${isMobile(p) && !it.nw ? `<a class="btn btn-wa" href="${waHref(p, waMsg(it))}" target="_blank" rel="noopener" data-act="whatsapp" aria-label="واتساب">${I('wa', 'sm')}</a>` : ''}
+      ${isMobile(p) && !it.nw ? `<a class="btn btn-wa" href="${waHref(p, waMsg(it, p))}" target="_blank" rel="noopener" data-act="whatsapp" aria-label="واتساب">${I('wa', 'sm')}</a>` : ''}
       <a class="btn btn-primary" href="${telHref(p)}" data-act="call">${I('phone', 'sm')}اتصال</a>
     </div>`).join('');
   const waExtra = wa && !(it.p || []).includes(wa)
-    ? `<div class="phone-row"><div class="num"><bdi dir="ltr">${esc(formatPhone(wa))}</bdi><span class="kind">واتساب</span></div><a class="btn btn-wa" href="${waHref(wa, waMsg(it))}" target="_blank" rel="noopener" data-act="whatsapp">${I('wa', 'sm')}مراسلة</a></div>` : '';
-  const fromWa = new URL(location.href).searchParams.get('w') === '1';
-  const ownerBox = fromWa ? `<div class="owner-box"><p><b>وصلتكم رسالة من الدليل؟</b> اختاروا ما يناسبكم:</p>
-    ${(it.p || []).map((p) => `<button class="btn btn-danger btn-block" type="button" data-act="rmnum" data-ph="${esc(p)}">${I('x', 'sm')}الرقم خطأ — يرجى حذف <bdi dir="ltr">${esc(formatPhone(p))}</bdi></button>`).join('')}
-    <div class="owner-box-row"><button class="btn btn-soft" type="button" data-act="report" data-kind="wrong_info">${I('edit', 'sm')}تعديل</button><button class="btn btn-soft" type="button" data-act="report" data-kind="wrong_number">${I('flag', 'sm')}إبلاغ</button></div></div>` : '';
+    ? `<div class="phone-row"><div class="num"><bdi dir="ltr">${esc(formatPhone(wa))}</bdi><span class="kind">واتساب</span></div><a class="btn btn-wa" href="${waHref(wa, waMsg(it, wa))}" target="_blank" rel="noopener" data-act="whatsapp">${I('wa', 'sm')}مراسلة</a></div>` : '';
+  const cur = new URL(location.href);
+  const ownerBox = cur.searchParams.get('w') === '1' ? ownerBoxHtml(it, (cur.hash.match(/^#p=(\d{4,15})$/) || [])[1] || '') : '';
   const body = `<div data-id="${it.i}">
     ${ownerBox}
     <div class="detail-hero" style="--hue:${catHue(cat)}">
@@ -976,6 +1064,27 @@ function openReport(hash) {
   });
 }
 
+// إرسال نموذج «تعديل البيانات» من نافذة صاحب الرقم (يصل إلى «البلاغات» بنوع owner_edit)
+document.addEventListener('submit', (e) => {
+  const f = e.target;
+  if (!f || f.id !== 'ob-edit') return;
+  e.preventDefault();
+  const ob = f.closest('.owner-box');
+  const holder = f.closest('[data-id]');
+  const it = holder && state.byId.get(Number(holder.dataset.id));
+  if (!ob || !it) return;
+  const ph = ob.dataset.ph || '';
+  const text = ownerEditText(it, ph, new FormData(f));
+  const err = f.querySelector('.form-error');
+  if (text.length < 5) { err.textContent = 'لم يتغيّر شيء. عدّلوا معلومة أو اكتبوا ملاحظة.'; err.hidden = false; return; }
+  ownerSignal(ob, it, ph, 'edit', text);
+});
+// يختفي تنبيه «لم يتغيّر شيء» مع أول تعديل
+document.addEventListener('input', (e) => {
+  const f = e.target.closest && e.target.closest('form#ob-edit');
+  if (f) f.querySelector('.form-error').hidden = true;
+});
+
 // ─────────────── التفاعل ───────────────
 
 function toast(msg, ms = 2200) {
@@ -1082,24 +1191,38 @@ document.addEventListener('click', (e) => {
     go({ l: null, hash: it ? `report-${it.i}` : 'report' }, { keep: true, push: !history.state?.sheet });
     return;
   }
-  if (actName === 'rmnum' && it) {
-    // يُسجَّل بلاغ «الرقم خطأ» فوراً في القاعدة (وقد يُوقَف الرقم مؤقتاً عن الزوار)، ثم رسالة واتساب جاهزة من الرقم نفسه تُثبت الملكية
+  // نافذة صاحب الرقم: الخيارات الثلاثة للرقم الذي وصلته الرسالة (data-ph على الصندوق)
+  const ob = actName && (actName.startsWith('ob-') || actName === 'rmnum') ? act.closest('.owner-box') : null;
+  if (ob && it) {
     e.preventDefault();
-    const ph = act.dataset.ph;
-    const wa = (state.settings.contact || {}).whatsapp;
-    const msg = `الرقم خطأ، يرجى حذف الرقم ${formatPhone(ph)} من بطاقة «${it.n}» (#${it.i})\n${location.origin}/admin/#rm?l=${it.i}&p=${ph}`;
-    const ob = act.closest('.owner-box');
-    if (ob) {
+    const ph = ob.dataset.ph || act.dataset.ph || '';
+    if (actName === 'ob-pick' || actName === 'ob-back') { ob.outerHTML = ownerBoxHtml(it, actName === 'ob-pick' ? act.dataset.ph : ph); return; }
+    if (actName === 'ob-ok') { ownerSignal(ob, it, ph, 'approve'); return; }
+    if (actName === 'ob-edit') { ownerEditForm(ob, it, ph); return; }
+    if (actName === 'ob-del') {
+      const only = (it.p || []).length === 1;
+      ob.innerHTML = `<p><b>حذف الرقم <bdi dir="ltr">${esc(formatPhone(ph))}</bdi> نهائياً من الدليل؟</b></p>
+        <p>${only ? `هو الرقم الوحيد في بطاقة «${esc(it.n)}» فتُحذف البطاقة معه.` : `يُحذف هذا الرقم وحده وتبقى بطاقة «${esc(it.n)}» بأرقامها الأخرى.`} يُخفى الرقم فوراً عن الزوار ما أمكن، وتحذفه الإدارة نهائياً بعد المراجعة فلا يُضاف مرة أخرى.</p>
+        <button class="btn btn-danger btn-lg btn-block" type="button" data-act="rmnum" data-ph="${esc(ph)}">${I('x', 'sm')}نعم، الرقم خطأ — احذفوه</button>
+        <button class="btn btn-soft btn-block" type="button" data-act="ob-back">رجوع</button>`;
+      return;
+    }
+    if (actName === 'rmnum') {
+      // يُسجَّل بلاغ «الرقم خطأ» فوراً في القاعدة (وقد يُوقَف الرقم مؤقتاً عن الزوار)، ثم رسالة واتساب جاهزة من الرقم نفسه تُثبت الملكية
+      const wa = (state.settings.contact || {}).whatsapp;
+      const msg = `الرقم خطأ، يرجى حذف الرقم ${formatPhone(ph)} من بطاقة «${it.n}» (#${it.i})\n${location.origin}/admin/#rm?l=${it.i}&p=${ph}`;
       ob.innerHTML = '<p>جارٍ تسجيل طلبكم…</p>';
       rpc('flag_phone', { p_listing: it.i, p_phone: ph }).catch(() => null).then((r) => {
-        const head = r && r.ok
-          ? `<b>✅ سجّلنا طلب حذف الرقم <bdi dir="ltr">${esc(formatPhone(ph))}</bdi></b><br>${r.held ? 'وأخفيناه مؤقتاً عن الزوار إلى أن نراجعه. ' : ''}سنراجعه ونحذفه بأقرب وقت.`
-          : `<b>🗑 طلب حذف الرقم <bdi dir="ltr">${esc(formatPhone(ph))}</bdi></b><br>${r && r.error === 'rate' ? 'تجاوزتم الحد اليومي للطلبات، لكن يمكنكم إرسال الرسالة التالية.' : 'تعذّر تسجيل الطلب تلقائياً، أرسلوه بالرسالة التالية.'}`;
-        ob.innerHTML = `<p>${head}</p>
-          <p>لتسريع الحذف اضغطوا الزر لإرسال رسالة جاهزة من واتساب هذا الرقم؛ وصولها من رقمكم يثبت أنكم أصحابه فنحذفه فوراً. (اختياري)</p>${wa ? `<a class="btn btn-wa btn-block" href="${waHref(wa, msg)}" target="_blank" rel="noopener">${I('wa', 'sm')}أرسل طلب الحذف عبر واتساب</a>` : ''}`;
+        const ok = r && r.ok;
+        ownerBoxState(ob, ok ? '✅' : '⚠️',
+          ok ? `سجّلنا طلب حذف الرقم <bdi dir="ltr">${esc(formatPhone(ph))}</bdi>` : `لم يُسجَّل طلب حذف الرقم <bdi dir="ltr">${esc(formatPhone(ph))}</bdi> تلقائياً`,
+          ok ? `${r.held ? 'أخفيناه عن الزوار مؤقتاً، و' : ''}ستحذفه الإدارة نهائياً بعد المراجعة. نعتذر عن الإزعاج 🌿`
+            : (OB_ERR[r && r.error] || 'تعذّر الاتصال.') + (wa ? ' يمكنكم إرسال الطلب بالرسالة التالية.' : ''),
+          wa ? `<p class="ob-note">لتسريع الحذف أرسلوا هذه الرسالة الجاهزة من واتساب هذا الرقم؛ وصولها من رقمكم يثبت أنكم أصحابه فيُحذف فوراً. (اختياري)</p>
+            <a class="btn btn-wa btn-block" href="${waHref(wa, msg)}" target="_blank" rel="noopener">${I('wa', 'sm')}أرسل طلب الحذف عبر واتساب</a>` : '');
       });
+      return;
     }
-    return;
   }
   if (actName === 'addphone') { e.preventDefault(); go({ l: null, hash: `addphone-${id}` }, { keep: true, push: !history.state?.sheet }); return; }
   if (actName === 'close') { e.preventDefault(); closeSheet(); return; }
