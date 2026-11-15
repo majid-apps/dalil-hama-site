@@ -2096,7 +2096,10 @@ const SITE_FILES = [
 const BACKUP_TABLES = [
   ['categories', 'categories?select=*&order=id.asc'], ['areas', 'areas?select=*&order=id.asc'], ['listings', 'listings?select=*&order=id.asc'],
   ['settings', 'settings?select=*&order=key.asc'], ['reports', 'reports?select=*&order=id.asc'], ['excluded_phones', 'excluded_phones?select=*&order=phone.asc'],
-  ['held_phones', 'held_phones?select=*&order=phone.asc'], ['owner_links', 'owner_links?select=listing_id,phone,created_at,expires_at,used_at,action&order=created_at.asc'], // بلا الرمز (token): كان يكفي وحده لنشر بطاقة أو حذفها, ['listing_stats', 'listing_stats?select=*&order=listing_id.asc'],
+  ['held_phones', 'held_phones?select=*&order=phone.asc'],
+  // owner_links بلا الرمز (token): كان يكفي وحده لنشر بطاقة أو حذفها. كل جدول في سطره (تعليق وسط سطر يعطّل ما بعده)
+  ['owner_links', 'owner_links?select=listing_id,phone,created_at,expires_at,used_at,action&order=created_at.asc'],
+  ['listing_stats', 'listing_stats?select=*&order=listing_id.asc'],
   ['daily_stats', 'daily_stats?select=*&order=day.asc,kind.asc'], ['search_terms', 'search_terms?select=*&order=term.asc'], ['audit_log', 'audit_log?select=*&order=id.asc'],
   ['admins', 'admins?select=user_id,role,created_at&order=created_at.asc'], // بلا البريد ولا كلمات المرور
 ];
