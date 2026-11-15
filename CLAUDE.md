@@ -13,7 +13,7 @@
 ## النشر
 - السيرفر يسحب `dalil-hama/public` من فرع `main` هنا كل 10 دقائق (الإعداد في `/etc/dalil-hama-site/config`: `REPO=majid-apps/dalil-hama-site` و`BRANCH=main`).
 - اعمل على فرع جانبي، ولا تدمج في `main` دون موافقة مجيد (الدمج ينشر على الموقع الحي خلال دقائق).
-- تعديل القاعدة = ملف جديد برقم تالٍ في `dalil-hama/supabase/migrations/` ثم على السيرفر `sudo dalil-hama-site install-db`.
+- تعديل القاعدة = ملف جديد برقم تالٍ في `dalil-hama/supabase/migrations/` ثم على السيرفر **بعد الدمج** `sudo dalil-hama-site update` ثم `sudo dalil-hama-site install-db` بهذا الترتيب: السحب التلقائي يرفض إصداراً يحتاج migration جديدة حتى يُشغَّل `install-db`، و`install-db` وحده قبل `update` يطبّق هجرات الإصدار المعروض فقط (حدث ذلك في v1.13.0).
 - الأوامر: `sudo dalil-hama-site status | update | previous`.
 - عند تغيير js/css ارفع `?v=` في `index.html` و`admin/index.html` ورقم `VERSION` في `sw.js`. (الإدارة لم تعد في قائمة `SHELL`؛ تُخزَّن على جوال مجيد عند أول فتح وتفتح فوراً ثم تتحدّث في الخلفية.) وحّد رقم `?v=` لـ`app.css` في كل الصفحات. لا سكربتات مضمّنة في HTML. لا تغيّر `assets/js/config.js`.
 
