@@ -11,6 +11,11 @@ const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const SESSION_KEY = 'dh:admin-session';
 const PAGE = 60;
 
+/** رقم قصير (رباعي) قبله مجيد: سطر يبدأ بـ«✅ رقم رباعي» في admin_note يُخرج البطاقة من «أرقام غير اعتيادية» ومن تنبيه الحفظ */
+const ODD_OK = '✅ رقم رباعي';
+const oddOk = (note) => String(note || '').includes(ODD_OK);
+const oddPhone = (r) => !oddOk(r.admin_note) && (r.phones || []).some((p) => !/^0\d{9}$/.test(p));
+
 const STATUS = { approved: 'منشور', pending: 'قيد المراجعة', hidden: 'مخفي', rejected: 'مرفوض' };
 const REPORT_KIND = { wrong_number: 'رقم خاطئ', wrong_info: 'معلومات ناقصة/خاطئة', closed: 'مغلق نهائياً', removal: 'طلب حذف', abuse: 'إزعاج أو احتيال', other: 'أخرى' };
 const REPORT_STATUS = { open: 'مفتوح', resolved: 'تمت المعالجة', dismissed: 'مُتجاهل' };
@@ -1500,7 +1505,7 @@ function filtered() {
     if (f.flag === 'noarea' && r.area) return false;
     if (f.flag === 'featured' && !r.featured) return false;
     if (f.flag === 'verified' && !r.verified) return false;
-    if (f.flag === 'odd' && !(r.phones || []).some((p) => !/^0\d{9}$/.test(p))) return false;
+    if (f.flag === 'odd' && !oddPhone(r)) return false;
     if (f.flag === 'latin' && !isLatinName(r)) return false;
     return true;
   });
@@ -1686,7 +1691,7 @@ function editListing(id, preset = {}) {
     };
     if (body.name.length < 2) { err.textContent = 'الاسم مطلوب.'; err.hidden = false; return; }
     if ((body.lat === null) !== (body.lng === null)) { err.textContent = 'أدخل خط العرض والطول معاً أو اتركهما فارغين.'; err.hidden = false; return; }
-    const odd = body.phones.filter((p) => !/^0\d{9}$/.test(p));
+    const odd = oddOk(body.admin_note) ? [] : body.phones.filter((p) => !/^0\d{9}$/.test(p));
     if (odd.length && !form.dataset.oddOk) {
       err.innerHTML = `تنبيه: رقم غير اعتيادي (<bdi dir="ltr">${esc(odd.join('، '))}</bdi>): الجوال 09 + 8 أرقام والأرضي 013 + 7 أرقام. صحّحه، أو اضغط «حفظ» مرة أخرى للمتابعة كما هو.`;
       err.hidden = false;
@@ -1850,7 +1855,7 @@ function viewQuality(el) {
   const dupPhones = dupPhonesAll.filter(([, rs]) => !ok.has(dupKey(rs)));
   const dupNames = dupNamesAll.filter((rs) => !ok.has(dupKey(rs)));
   const acceptedN = dupPhonesAll.filter(([, rs]) => ok.has(dupKey(rs))).length + dupNamesAll.filter((rs) => ok.has(dupKey(rs))).length;
-  const odd = live.filter((r) => (r.phones || []).some((p) => !/^0\d{9}$/.test(p)));
+  const odd = live.filter(oddPhone);
   const count = (fn) => live.filter(fn).length;
   const group = (rs, title) => `<div class="dup-group"><b>${title}</b> <button class="btn btn-primary" type="button" data-mergegroup="${rs.map((r) => r.id).join(',')}" style="min-height:32px;padding:0 10px;margin-inline-start:8px">${I('merge', 'sm')}دمج المجموعة</button><button class="btn btn-soft" type="button" data-acceptgroup="${rs.map((r) => r.id).join(',')}" title="فروع مستقلة: لا تعرض هذه المجموعة ثانية" style="min-height:32px;padding:0 10px;margin-inline-start:6px">${I('check', 'sm')}قبول (فروع مستقلة)</button><div class="rows">${rs.map((r) => listingRow(r, { select: false, ops: `<button class="btn btn-soft" data-edit="${r.id}">${I('edit', 'sm')}تعديل</button><button class="btn btn-soft" data-merge="${r.id}">${I('merge', 'sm')}دمج</button>` })).join('')}</div></div>`;
   el.innerHTML = `<div class="kpis">
