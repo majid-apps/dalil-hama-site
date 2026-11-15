@@ -141,7 +141,10 @@ async function loadData() {
     applyData(clean);
   } catch (err) {
     console.warn('sync failed', err);
-    if (!cached) {
+    if (cached) {
+      // النسخة المحفوظة معروضة: نخبر الزائر أنها قد لا تكون الأحدث بدل أن يظنها حديثة
+      toast(navigator.onLine === false ? 'أنت دون اتصال: تُعرض نسخة محفوظة من الدليل' : 'تعذّر تحديث الدليل الآن، تُعرض نسخة محفوظة', 4500);
+    } else {
       $('#view').innerHTML = `<div class="empty"><div class="big">📡</div><h3>تعذّر الاتصال</h3><p>تحقق من اتصالك بالإنترنت ثم حاول مجدداً.</p><div class="row"><button class="btn btn-primary" type="button" data-act="reload">${I('refresh', 'sm')}إعادة المحاولة</button></div></div>`;
     }
   }
