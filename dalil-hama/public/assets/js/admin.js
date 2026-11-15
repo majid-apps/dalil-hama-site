@@ -1828,17 +1828,31 @@ function mergeDialog(keepId) {
 
 // ─────────────── جودة البيانات ───────────────
 
+/** مجموعات مكررة «مقبولة» (فروع مستقلة): لا تُعرض ثانية. المفتاح معرّفات أعضاء المجموعة مرتّبة، فإن دخلت بطاقة جديدة على المجموعة عادت للظهور.
+ *  تُحفظ في settings.dup_ok بـis_public=false فلا تُرسل للزوار (sync لا تحمل إلا العامة)، وتدخل النسخة الكاملة مع الإعدادات. */
+const dupKey = (rs) => rs.map((r) => r.id).sort((a, b) => a - b).join(',');
+const dupAccepted = () => new Set(Array.isArray(A.settings.dup_ok) ? A.settings.dup_ok : []);
+async function saveDupOk(list) {
+  await rest('settings?on_conflict=key', { method: 'POST', body: { key: 'dup_ok', value: list, is_public: false }, headers: { Prefer: 'resolution=merge-duplicates,return=minimal' } });
+  A.settings.dup_ok = list;
+  cache.later();
+}
+
 function viewQuality(el) {
   const live = A.listings.filter((r) => r.status === 'approved' || r.status === 'pending');
   const byPhone = new Map();
   for (const r of live) for (const p of r.phones || []) { if (!byPhone.has(p)) byPhone.set(p, []); byPhone.get(p).push(r); }
-  const dupPhones = [...byPhone.entries()].filter(([, rs]) => rs.length > 1);
+  const dupPhonesAll = [...byPhone.entries()].filter(([, rs]) => rs.length > 1);
   const byName = new Map();
   for (const r of live) { const k = `${normalize(r.name)}|${r.category_id}`; if (!byName.has(k)) byName.set(k, []); byName.get(k).push(r); }
-  const dupNames = [...byName.values()].filter((rs) => rs.length > 1 && !dupPhones.some(([, d]) => d.every((x) => rs.includes(x))));
+  const dupNamesAll = [...byName.values()].filter((rs) => rs.length > 1 && !dupPhonesAll.some(([, d]) => d.every((x) => rs.includes(x))));
+  const ok = dupAccepted();
+  const dupPhones = dupPhonesAll.filter(([, rs]) => !ok.has(dupKey(rs)));
+  const dupNames = dupNamesAll.filter((rs) => !ok.has(dupKey(rs)));
+  const acceptedN = dupPhonesAll.filter(([, rs]) => ok.has(dupKey(rs))).length + dupNamesAll.filter((rs) => ok.has(dupKey(rs))).length;
   const odd = live.filter((r) => (r.phones || []).some((p) => !/^0\d{9}$/.test(p)));
   const count = (fn) => live.filter(fn).length;
-  const group = (rs, title) => `<div class="dup-group"><b>${title}</b> <button class="btn btn-primary" type="button" data-mergegroup="${rs.map((r) => r.id).join(',')}" style="min-height:32px;padding:0 10px;margin-inline-start:8px">${I('merge', 'sm')}دمج المجموعة</button><div class="rows">${rs.map((r) => listingRow(r, { select: false, ops: `<button class="btn btn-soft" data-edit="${r.id}">${I('edit', 'sm')}تعديل</button><button class="btn btn-soft" data-merge="${r.id}">${I('merge', 'sm')}دمج</button>` })).join('')}</div></div>`;
+  const group = (rs, title) => `<div class="dup-group"><b>${title}</b> <button class="btn btn-primary" type="button" data-mergegroup="${rs.map((r) => r.id).join(',')}" style="min-height:32px;padding:0 10px;margin-inline-start:8px">${I('merge', 'sm')}دمج المجموعة</button><button class="btn btn-soft" type="button" data-acceptgroup="${rs.map((r) => r.id).join(',')}" title="فروع مستقلة: لا تعرض هذه المجموعة ثانية" style="min-height:32px;padding:0 10px;margin-inline-start:6px">${I('check', 'sm')}قبول (فروع مستقلة)</button><div class="rows">${rs.map((r) => listingRow(r, { select: false, ops: `<button class="btn btn-soft" data-edit="${r.id}">${I('edit', 'sm')}تعديل</button><button class="btn btn-soft" data-merge="${r.id}">${I('merge', 'sm')}دمج</button>` })).join('')}</div></div>`;
   el.innerHTML = `<div class="kpis">
       <button class="kpi" data-flag="nophone"><small>بلا رقم</small><b>${fmtNum(count((r) => !(r.phones || []).length))}</b></button>
       <button class="kpi" data-flag="noloc"><small>بلا موقع</small><b>${fmtNum(count((r) => !r.lat && !r.map_url))}</b></button>
@@ -1849,8 +1863,27 @@ function viewQuality(el) {
       <div class="kpi"><small>أسماء مكررة</small><b>${fmtNum(dupNames.length)}</b></div>
     </div>
     <div class="panel"><h2>${I('merge')}أرقام مكررة بين أكثر من نشاط</h2>${dupPhones.length ? dupPhones.map(([p, rs]) => group(rs, `<bdi dir="ltr">${esc(formatPhone(p))}</bdi>`)).join('') : '<p class="muted">لا توجد أرقام مكررة 👌</p>'}</div>
-    <div class="panel"><h2>${I('copy')}أسماء متطابقة في نفس التصنيف</h2>${dupNames.length ? dupNames.slice(0, 60).map((rs) => group(rs, esc(rs[0].name))).join('') : '<p class="muted">لا توجد أسماء مكررة 👌</p>'}</div>`;
-  el.onclick = (e) => {
+    <div class="panel"><h2>${I('copy')}أسماء متطابقة في نفس التصنيف</h2>${dupNames.length ? dupNames.slice(0, 60).map((rs) => group(rs, esc(rs[0].name))).join('') : '<p class="muted">لا توجد أسماء مكررة 👌</p>'}</div>
+    ${acceptedN ? `<div class="panel"><h2>${I('check')}مجموعات مقبولة (${fmtNum(acceptedN)})</h2><p class="muted" style="margin:0 0 10px">قبلتَها كفروع مستقلة فلا تظهر أعلاه. إن دخلت بطاقة جديدة على مجموعة منها عادت للظهور.</p><button class="btn btn-soft" type="button" data-resetdup>إعادة عرض المجموعات المقبولة</button></div>` : ''}`;
+  el.onclick = async (e) => {
+    const ac = e.target.closest('[data-acceptgroup]');
+    if (ac) {
+      const key = dupKey(ac.dataset.acceptgroup.split(',').map((id) => ({ id: Number(id) })));
+      const prev = Array.isArray(A.settings.dup_ok) ? A.settings.dup_ok : [];
+      if (prev.includes(key)) return;
+      ac.disabled = true;
+      try {
+        await saveDupOk([...prev, key]);
+        toast('قُبلت كفروع مستقلة ✓ — لن تظهر ثانية');
+        viewQuality(el);
+      } catch (err) { ac.disabled = false; toast(errMsg(err), true); }
+      return;
+    }
+    if (e.target.closest('[data-resetdup]')) {
+      if (!(await confirmBox('إعادة عرض كل المجموعات المقبولة؟', { ok: 'إعادة العرض' }))) return;
+      try { await saveDupOk([]); toast('أُعيد عرضها'); viewQuality(el); } catch (err) { toast(errMsg(err), true); }
+      return;
+    }
     const k = e.target.closest('[data-flag]');
     if (k) { A.f = { q: '', cat: '', status: 'approved', flag: k.dataset.flag, area: '', sort: 'new' }; location.hash = 'listings'; }
     const m = e.target.closest('[data-merge]');
