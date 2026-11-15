@@ -100,6 +100,8 @@ async function api(path, opts = {}, retry = true) {
 const rest = (path, opts) => api(`/rest/v1/${path}`, opts);
 const rpc = (name, args = {}) => api(`/rest/v1/rpc/${name}`, { method: 'POST', body: args });
 const rep = { Prefer: 'return=representation' };
+/** البلاغات: كل المفتوحة مهما قدمت + المعالَجة في آخر 60 يوماً (كان الحدّ آخر 300 فقط فتختفي المفتوحة القديمة عند كثرة البلاغات) */
+const reportsQuery = () => `reports?select=*&or=(status.eq.open,created_at.gte.${encodeURIComponent(new Date(Date.now() - 60 * 86400000).toISOString())})&order=created_at.desc&limit=1000`; // 1000 = سقف PostgREST (db-max-rows)
 
 // ─────────────── الحالة ───────────────
 
@@ -223,7 +225,7 @@ async function loadAll(base) {
     rest('areas?select=*&order=sort.asc,name.asc'),
     rest('settings?select=*'),
     rpc('admin_stats'),
-    rest('reports?select=*&order=created_at.desc&limit=300'),
+    rest(reportsQuery()),
     rest('excluded_phones?select=*&order=created_at.desc').catch(() => []), // قبل تثبيت migration 0008
   ]);
   const total = ['approved', 'pending', 'hidden', 'rejected'].reduce((n, k) => n + (Number(stats && stats[k]) || 0), 0);
@@ -787,14 +789,15 @@ function viewDash(el) {
   const chartV = list.map(([day, v]) => `<div class="col" data-tip="${day.slice(5)}: ${v.visit || 0} زيارة · ${v.search || 0} بحث"><div class="seg" style="height:${((v.visit || 0) / maxV) * 100}%;background:var(--brand)"></div></div>`).join('');
   const pend = A.listings.filter((r) => r.status === 'pending');
   const t = { todo: pend.filter((r) => isCand(r) && !isSent(r)).length, sent: pend.filter((r) => isCand(r) && isSent(r)).length,
-    req: pend.filter((r) => !isCand(r)).length, rep: A.reports.filter((r) => r.status === 'open').length };
+    req: pend.filter((r) => !isCand(r)).length, rep: A.reports.filter((r) => r.status === 'open').length,
+    stale: pend.filter((r) => isCand(r) && isSent(r) && (sentDays(r) ?? 0) >= STALE_DAYS).length };
   const task = (href, n, label, hint, ic) => `<a class="task${n ? ' on' : ''}" href="${href}">${I(ic)}<b>${fmtNum(n)}</b><span>${label}<small>${hint}</small></span></a>`;
   el.innerHTML = `
     <div class="panel tasks-panel" style="margin-top:0"><h2>${I('check')}مهام اليوم</h2>
       ${backupAgeDays() === null || backupAgeDays() >= BACKUP_DAYS ? `<div class="warnbox" style="margin-bottom:10px">${I('alert', 'sm')}${backupAgeDays() === null ? 'لم تأخذ نسخة احتياطية من هذا الجهاز بعد.' : `مضى ${fmtNum(backupAgeDays())} يوماً على آخر نسخة احتياطية.`} <a href="#io" style="font-weight:700;color:var(--brand)">خذ نسخة كاملة الآن</a></div>` : ''}
       ${t.todo + t.sent + t.req + t.rep ? `<div class="tasks">
         ${task('#cands?tab=todo', t.todo, 'مرشحون للمراسلة', 'أرسل لهم رسالة الموافقة', 'wa')}
-        ${task('#cands?tab=sent', t.sent, 'بانتظار ردّهم', 'انشر من وافق منهم', 'clock')}
+        ${task('#cands?tab=sent', t.sent, 'بانتظار ردّهم', t.stale ? `منهم ${fmtNum(t.stale)} منذ أكثر من أسبوع: أعد مراسلتهم` : 'انشر من وافق منهم', 'clock')}
         ${task('#inbox?tab=req', t.req, 'طلبات انضمام', 'راجعها وانشرها', 'inbox')}
         ${task('#inbox?tab=rep', t.rep, 'بلاغات', 'صحّح أو أخفِ', 'flag')}
       </div>` : '<p class="muted" style="margin:0">لا شيء ينتظرك الآن 🎉</p>'}</div>
@@ -818,7 +821,7 @@ function viewDash(el) {
       <div class="panel"><h2>${I('phone')}التواصل خلال 30 يوماً</h2><div class="chart">${chart}</div>
         <div class="legend"><span><i style="background:var(--brand)"></i>اتصال ${fmtNum(sum('call'))}</span><span><i style="background:var(--wa)"></i>واتساب ${fmtNum(sum('whatsapp'))}</span><span><i style="background:var(--gold-2)"></i>مشاهدة ${fmtNum(sum('view'))}</span><span><i style="background:var(--muted)"></i>خريطة ${fmtNum(sum('map'))}</span></div></div>
       <div class="panel"><h2>${I('chart')}الزيارات والبحث</h2><div class="chart">${chartV}</div>
-        <div class="legend"><span><i style="background:var(--brand)"></i>زيارة ${fmtNum(sum('visit'))}</span><span>بحث ${fmtNum(sum('search'))}</span><span>إضافات ${fmtNum(sum('submission'))}</span><span>بلاغات ${fmtNum(sum('report'))}</span></div></div>
+        <div class="legend"><span><i style="background:var(--brand)"></i>زيارة ${fmtNum(sum('visit'))}</span><span>بحث ${fmtNum(sum('search'))}</span><span>إضافات ${fmtNum(sum('submission'))}</span><span>بلاغات ${fmtNum(sum('report'))}</span><span title="طلبات رُفضت لتجاوز حدّ المعدل (إضافة، بلاغ، «الرقم خطأ»، صاحب الرقم). إن زادت كثيراً فارفع الحدود في private.rate_limits">${sum('rate') ? '⚠️ ' : ''}رُفضت لكثرتها ${fmtNum(sum('rate'))}</span></div></div>
     </div>
     <div class="panel-grid">
       <div class="panel"><h2>${I('star')}الأكثر تواصلاً</h2>${s.top.length ? `<ol class="rank">${s.top.map((t) => `<li><span class="grow"><a href="#" data-edit="${t.id}">${esc(t.name)}</a></span><span class="v">📞 ${fmtNum(t.calls)} · 💬 ${fmtNum(t.whatsapp)} · 👁 ${fmtNum(t.views)}</span></li>`).join('')}</ol>` : '<p class="muted">لا توجد بيانات بعد. ستظهر هنا الأنشطة التي يتصل بها الناس أكثر.</p>'}</div>
@@ -844,6 +847,12 @@ function registerOwnerLink(id, phone, token) {
 
 const SENT = '📨';
 const isSent = (r) => (r.admin_note || '').includes(SENT);
+/** أيام منذ آخر «طُلبت الموافقة YYYY-MM-DD» في الملاحظة (null إن لم يوجد تاريخ) */
+const sentDays = (r) => {
+  const ds = [...(r.admin_note || '').matchAll(new RegExp(`${SENT}[^\\n]*?(\\d{4}-\\d{2}-\\d{2})`, 'g'))].map((m) => Date.parse(m[1])).filter(Number.isFinite);
+  return ds.length ? Math.floor((Date.now() - Math.max(...ds)) / 86400000) : null;
+};
+const STALE_DAYS = 7;
 // «قائمة البحث»: مرشحون بلا رقم أو عنوان واضح يُخفَون مؤقتاً (hidden + وسم) للبحث عن بياناتهم لاحقاً، ويمكن إعادتهم للمراجعة
 const LATER_TAG = 'قائمة-بحث';
 const LATER_NOTE = '🔎 قائمة البحث: ينقصه رقم أو عنوان أو موقع';
@@ -1206,7 +1215,7 @@ function excludePhones(phones, note = null) {
       const [rows, ex, reps] = await Promise.all([
         ids && ids.length ? rest(`listings?select=*&id=in.(${ids.join(',')})`) : [],
         rest('excluded_phones?select=*&order=created_at.desc'),
-        rest('reports?select=*&order=created_at.desc&limit=300').catch(() => null),
+        rest(reportsQuery()).catch(() => null),
       ]);
       upsertMany(rows);
       setExcluded(ex);
@@ -1399,7 +1408,7 @@ async function phoneAction(phone, kind, listingId, after) {
       const ids = await rpc('admin_release_phone', { p_phone: ph, p_ok: true });
       const [rows, reps] = await Promise.all([
         ids && ids.length ? rest(`listings?select=*&id=in.(${ids.join(',')})`) : [],
-        rest('reports?select=*&order=created_at.desc&limit=300'),
+        rest(reportsQuery()),
       ]);
       upsertMany(rows);
       A.reports = reps;
@@ -1584,7 +1593,7 @@ function viewListings(el) {
 
 // تعديل نشاط
 function editListing(id, preset = {}) {
-  const r = id ? A.byId.get(id) : { name: '', category_id: null, phones: [], tags: [], status: 'approved', featured: false, verified: false, no_whatsapp: false, ...preset };
+  const r = id ? A.byId.get(id) : { name: '', category_id: null, phones: [], tags: [], status: 'pending', featured: false, verified: false, no_whatsapp: false, ...preset };
   if (!r) return;
   const phones = (r.phones && r.phones.length ? r.phones : ['']);
   const body = `<form class="form" id="edit-form" novalidate>
@@ -1677,6 +1686,13 @@ function editListing(id, preset = {}) {
     };
     if (body.name.length < 2) { err.textContent = 'الاسم مطلوب.'; err.hidden = false; return; }
     if ((body.lat === null) !== (body.lng === null)) { err.textContent = 'أدخل خط العرض والطول معاً أو اتركهما فارغين.'; err.hidden = false; return; }
+    const odd = body.phones.filter((p) => !/^0\d{9}$/.test(p));
+    if (odd.length && !form.dataset.oddOk) {
+      err.innerHTML = `تنبيه: رقم غير اعتيادي (<bdi dir="ltr">${esc(odd.join('، '))}</bdi>): الجوال 09 + 8 أرقام والأرضي 013 + 7 أرقام. صحّحه، أو اضغط «حفظ» مرة أخرى للمتابعة كما هو.`;
+      err.hidden = false;
+      form.dataset.oddOk = '1';
+      return;
+    }
     const dup = A.listings.find((x) => x.id !== id && x.status !== 'rejected' && (x.phones || []).some((p) => body.phones.includes(p)));
     if (dup && !form.dataset.dupOk) {
       err.innerHTML = `تنبيه: الرقم مستخدم في «${esc(dup.name)}» (#${dup.id}). اضغط «حفظ» مرة أخرى للمتابعة، أو استخدم «دمج».`;
@@ -2058,6 +2074,14 @@ const SITE_FILES = [
   'assets/js/owner.js',
   'assets/js/search.js',
   'assets/js/theme.js',
+  'assets/vendor/leaflet/LICENSE',
+  'assets/vendor/leaflet/images/layers-2x.png',
+  'assets/vendor/leaflet/images/layers.png',
+  'assets/vendor/leaflet/images/marker-icon-2x.png',
+  'assets/vendor/leaflet/images/marker-icon.png',
+  'assets/vendor/leaflet/images/marker-shadow.png',
+  'assets/vendor/leaflet/leaflet.css',
+  'assets/vendor/leaflet/leaflet.js',
   'favicon.ico',
   'favicon.svg',
   'google77f7f09103a11f54.html',
@@ -2072,7 +2096,7 @@ const SITE_FILES = [
 const BACKUP_TABLES = [
   ['categories', 'categories?select=*&order=id.asc'], ['areas', 'areas?select=*&order=id.asc'], ['listings', 'listings?select=*&order=id.asc'],
   ['settings', 'settings?select=*&order=key.asc'], ['reports', 'reports?select=*&order=id.asc'], ['excluded_phones', 'excluded_phones?select=*&order=phone.asc'],
-  ['held_phones', 'held_phones?select=*&order=phone.asc'], ['owner_links', 'owner_links?select=*&order=token.asc'], ['listing_stats', 'listing_stats?select=*&order=listing_id.asc'],
+  ['held_phones', 'held_phones?select=*&order=phone.asc'], ['owner_links', 'owner_links?select=listing_id,phone,created_at,expires_at,used_at,action&order=created_at.asc'], // بلا الرمز (token): كان يكفي وحده لنشر بطاقة أو حذفها, ['listing_stats', 'listing_stats?select=*&order=listing_id.asc'],
   ['daily_stats', 'daily_stats?select=*&order=day.asc,kind.asc'], ['search_terms', 'search_terms?select=*&order=term.asc'], ['audit_log', 'audit_log?select=*&order=id.asc'],
   ['admins', 'admins?select=user_id,role,created_at&order=created_at.asc'], // بلا البريد ولا كلمات المرور
 ];
@@ -2157,7 +2181,7 @@ async function buildFullBackup(setStatus) {
 - README.txt: هذا الشرح.
 ${missing.length ? `ملفات لم تُجلب: ${missing.join('، ')}\n` : ''}${problems.length ? `جداول تعذّر جلبها: ${problems.join('؛ ')}\n` : ''}
 ما ليس في الملف
-- كلمات مرور الإدارة وبريدها (لا تُصدَّر أصلاً)، ومفاتيح تلغرام والسيرفر.
+- كلمات مرور الإدارة وبريدها ورموز روابط أصحاب الأرقام (لا تُصدَّر أصلاً)، ومفاتيح تلغرام والسيرفر.
 - كود السيرفر (إعداد Caddy وسكربت النشر وتعريف القاعدة migrations): هو في GitHub، وهذا رابط الإصدار نفسه:
   https://github.com/majid-apps/dalil-hama-site/archive/${sha}.zip
 
@@ -2180,7 +2204,7 @@ function viewIO(el) {
   const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
   const age = backupAgeDays();
   el.innerHTML = `<div class="panel" style="margin-top:0"><h2>${I('download')}نسخة كاملة: البيانات والبرنامج</h2>
-      <p class="muted" style="margin-top:0">ملف ZIP واحد يُحفظ على جوالك: كل جداول القاعدة (البطاقات والبلاغات والأرقام المستبعدة وروابط أصحاب الأرقام والإعدادات والإحصاءات وسجل التعديلات) مع كل ملفات الدليل والإدارة كما هي على الموقع الآن وشرح للاسترجاع. لا يحوي كلمات المرور. الملف غير مشفّر فلا تتركه في مكان عام.</p>
+      <p class="muted" style="margin-top:0">ملف ZIP واحد يُحفظ على جوالك: كل جداول القاعدة (البطاقات والبلاغات والأرقام المستبعدة وسجل روابط أصحاب الأرقام بلا رموزها والإعدادات والإحصاءات وسجل التعديلات) مع كل ملفات الدليل والإدارة كما هي على الموقع الآن وشرح للاسترجاع. لا يحوي كلمات المرور. الملف غير مشفّر فلا تتركه في مكان عام.</p>
       <div class="toolbar" style="margin:0"><button class="btn btn-primary" id="ex-full">${I('download', 'sm')}تنزيل النسخة الكاملة (ZIP)</button></div>
       <p class="muted" id="ex-full-st" style="margin:8px 0 0">${age === null ? 'لم تؤخذ نسخة من هذا الجهاز بعد.' : `آخر نسخة من هذا الجهاز قبل ${fmtNum(age)} يوماً.`}</p></div>
     <div class="panel"><h2>${I('download')}تصدير نسخة احتياطية</h2>

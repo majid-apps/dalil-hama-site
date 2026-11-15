@@ -635,6 +635,8 @@ api_routes() {
 		}
 		reverse_proxy 127.0.0.1:$API_PORT {
 			header_up -Cf-Connecting-Ip
+			header_up -X-Real-Ip
+			header_up X-Forwarded-For {remote_host}
 		}
 	}
 	handle_path /auth/v1/* {
@@ -643,6 +645,8 @@ api_routes() {
 		}
 		reverse_proxy 127.0.0.1:$AUTH_PORT {
 			header_up -Cf-Connecting-Ip
+			header_up -X-Real-Ip
+			header_up X-Forwarded-For {remote_host}
 		}
 	}
 	handle /assets/js/config.js {
@@ -725,7 +729,7 @@ $addresses {
 		Referrer-Policy "strict-origin-when-cross-origin"
 		Permissions-Policy "camera=(), geolocation=(self), microphone=(self)"
 		Cross-Origin-Opener-Policy "same-origin"
-		Content-Security-Policy "default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; img-src 'self' data: blob: https://tile.openstreetmap.org https://cdnjs.cloudflare.com; font-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; frame-src 'none'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'; upgrade-insecure-requests"
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://tile.openstreetmap.org; font-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; frame-src 'none'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'; upgrade-insecure-requests"
 		-Server
 	}
 
@@ -1972,7 +1976,7 @@ cmd_status() {
 
 # مولّد الصفحات الثابتة (بايثون، بلا مكتبات خارجية)
 GEN_PY=$(cat <<'PY'
-import hashlib, html, json, os, re, sys, urllib.request
+import datetime, hashlib, html, json, os, re, sys, urllib.parse, urllib.request
 
 # دليل حماة: مولّد الصفحات الثابتة (يجري كل 10 دقائق على السيرفر، بلا صلاحيات خاصة)
 #   data/sync.json     نسخة جاهزة من sync الكاملة (ETag) فلا تُشغَّل القاعدة لكل زائر جديد
@@ -2118,7 +2122,16 @@ for cid, lst in by_cat.items():
 
 # ─── 5) sitemap.xml ───
 sm = ['<?xml version="1.0" encoding="UTF-8"?>', '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
-sm += ['  <url><loc>%s</loc></url>' % E(u) for u in urls[:MAX_URLS]]
+today = datetime.date.today().isoformat()
+# بوابة ريف حماة وبلداتها (تُعرض بالجافاسكربت؛ الروابط وحدها تكفي لمحركات البحث لتصل إليها)
+rural_towns = sorted({it['a'] for it in items if it.get('a') in rural})
+if rural_towns:
+    urls.insert(2, SITE + '/?v=rural')
+    for k, town in enumerate(rural_towns):
+        urls.insert(3 + k, '%s/?v=rural&a=%s' % (SITE, urllib.parse.quote(town)))
+# lastmod للصفحات الرئيسية فقط (تاريخ التوليد): آخر تعديل لكل نشاط غير متاح في sync
+top = {SITE + '/', SITE + '/?v=rural'}
+sm += ['  <url><loc>%s</loc>%s</url>' % (E(u), '<lastmod>%s</lastmod>' % today if u in top else '') for u in urls[:MAX_URLS]]
 sm.append('</urlset>')
 files['sitemap.xml'] = ('\n'.join(sm) + '\n').encode('utf-8')
 

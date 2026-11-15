@@ -11,6 +11,8 @@ const $ = (s, r = document) => r.querySelector(s);
 const CACHE_KEY = 'dh:data:v1';
 const FULL_SYNC_EVERY = 7 * 24 * 3600 * 1000;
 const PAGE = 36;
+/** أقل عدد تواصلات (اتصال + واتساب) لدخول «الأكثر تواصلاً»: بعتبة صغيرة تظهر أولاً أنشطة قليلة الإحصاء فيبدو القسم انحيازاً */
+const POPULAR_MIN = 10;
 /** رسالة واتساب التي يبدأ بها الزائر محادثته مع النشاط: قصيرة وودّية يكمل الزائر كتابتها.
  *  آخر سطر لمن وصلته الرسالة بالخطأ (رقم خاطئ): رابط يفتح البطاقة مع زر «الرقم خطأ — يرجى حذف» (?w=1).
  *  رسالة «إشعار صاحب الرقم» الكاملة (الأرقام والعنوان ورابط التعديل أو الحذف) تُرسل من لوحة الإدارة وحدها. */
@@ -415,7 +417,7 @@ function renderHome() {
   const emergency = state.settings.emergency || [];
   const cats = [...state.cats].filter((c) => state.counts.get(c.i)).sort((a, b) => (state.counts.get(b.i) || 0) - (state.counts.get(a.i) || 0));
   const featured = state.city.filter((it) => it.f).slice(0, 9);
-  const popular = state.city.filter((it) => it.k >= 3).sort((a, b) => b.k - a.k).slice(0, 6);
+  const popular = state.city.filter((it) => it.k >= POPULAR_MIN).sort((a, b) => b.k - a.k).slice(0, 6);
   const newest = [...state.city].sort((a, b) => b.i - a.i).slice(0, 6);
   const recent = state.recent.map((id) => state.byId.get(id)).filter(Boolean).slice(0, 6);
   const areas = state.areas.filter((a) => state.areaCounts.get(a.n)).sort((a, b) => state.areaCounts.get(b.n) - state.areaCounts.get(a.n));
@@ -618,16 +620,13 @@ function loadLeaflet() {
   if (window.L) return Promise.resolve(window.L);
   if (!leafletPromise) {
     leafletPromise = new Promise((resolve, reject) => {
+      // من مجلد الموقع نفسه (Leaflet 1.9.4 الرسمي): لا يتعطل الخريطة إن حُجب cdnjs لدى بعض المزودين
       const css = document.createElement('link');
       css.rel = 'stylesheet';
-      css.href = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css';
-      css.integrity = 'sha512-h9FcoyWjHcOcmEVkxOfTLnmZFWIH0iZhZT1H2TbOq55xssQGEJHEaIm+PgoUaZbRvQTNTluNOEfb1ZRy6D3BOw==';
-      css.crossOrigin = 'anonymous';
+      css.href = '/assets/vendor/leaflet/leaflet.css';
       document.head.append(css);
       const js = document.createElement('script');
-      js.src = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js';
-      js.integrity = 'sha512-puJW3E/qXDqYp9IfhAI54BJEaWIfloJ7JWs7OeD5i6ruC9JZL1gERT1wjtwXFlh7CjE7ZJ+/vcRZRkIYIb6p4g==';
-      js.crossOrigin = 'anonymous';
+      js.src = '/assets/vendor/leaflet/leaflet.js';
       js.onload = () => resolve(window.L);
       // فشل التحميل لا يُحفظ، فتعيد المحاولة التالية الطلب من جديد
       js.onerror = (err) => { leafletPromise = null; css.remove(); js.remove(); reject(err); };
@@ -976,12 +975,12 @@ function openReport(hash) {
 
 // ─────────────── التفاعل ───────────────
 
-function toast(msg) {
+function toast(msg, ms = 2200) {
   const t = $('#toast');
   t.textContent = msg;
   t.classList.add('show');
   clearTimeout(toast.t);
-  toast.t = setTimeout(() => t.classList.remove('show'), 2200);
+  toast.t = setTimeout(() => t.classList.remove('show'), ms);
 }
 
 async function copy(text, msg = 'تم النسخ') {
@@ -1231,8 +1230,15 @@ window.addEventListener('beforeinstallprompt', (e) => {
   state.installEvt = e;
   $('#install-btn').classList.add('show');
 });
+// سفاري على iPhone/iPad لا يدعم beforeinstallprompt: نعرض الزر مع إرشاد «مشاركة ← إضافة إلى الشاشة الرئيسية»
+const IOS = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const STANDALONE = navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
+if (IOS && !STANDALONE) $('#install-btn').classList.add('show');
 $('#install-btn').addEventListener('click', async () => {
-  if (!state.installEvt) return;
+  if (!state.installEvt) {
+    if (IOS) toast('للتثبيت: اضغط زر «مشاركة» ⬆️ في سفاري ثم «إضافة إلى الشاشة الرئيسية»', 7000);
+    return;
+  }
   state.installEvt.prompt();
   await state.installEvt.userChoice;
   state.installEvt = null;

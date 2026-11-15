@@ -14,7 +14,7 @@ const ERR = {
   bad_action: 'تعذّر تنفيذ الطلب.',
   removed: 'تم حذف هذه البطاقة سابقاً من الدليل.',
   name: 'الاسم قصير أو طويل جداً.',
-  address: 'العنوان طويل جداً (300 حرف كحد أقصى).',
+  address: 'العنوان طويل جداً (400 حرف كحد أقصى).',
   description: 'النبذة طويلة جداً (600 حرف كحد أقصى).',
   phone: 'الرقم غير صالح.',
   phone_excluded: 'هذا الرقم مستبعد من الدليل ولا يمكن استعماله.',
@@ -79,7 +79,7 @@ function editForm() {
     <form class="o-form" id="o-edit" novalidate>
       <label>اسم النشاط<input class="input" name="name" maxlength="160" value="${esc(info.name)}" required></label>
       <label>الرقم<input class="input" name="phone" inputmode="tel" dir="ltr" maxlength="20" value="${esc(info.phone)}"></label>
-      <label>العنوان<input class="input" name="address" maxlength="300" value="${esc(info.address || '')}" placeholder="الحي، الشارع، بجانب…"></label>
+      <label>العنوان<input class="input" name="address" maxlength="400" value="${esc(info.address || '')}" placeholder="الحي، الشارع، بجانب…"></label>
       <label>نبذة قصيرة <em>(اختياري)</em><textarea class="input" name="description" maxlength="600" rows="3">${esc(info.description || '')}</textarea></label>
       <div class="o-acts"><button class="btn btn-primary btn-lg" type="submit">حفظ التعديل</button>
       <button class="btn btn-soft" type="button" data-act="back">رجوع</button></div>
