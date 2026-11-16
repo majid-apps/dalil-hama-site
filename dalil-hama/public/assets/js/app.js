@@ -583,15 +583,18 @@ function renderList(p, mode) {
   const sos = p.q ? emergencyFor(p.q) : [];
   if (sos.length) extra = sosHtml(sos, true) + extra;
 
+  // «الأقرب إليّ» قبل تحديد الموقع: لا قائمة إطلاقاً (كانت تظهر أنشطة غير مرتبة تحت «أين أنت الآن؟» فيظنها الزائر الأقرب)
+  const noGeo = mode === 'near' && !state.geo;
   view.innerHTML = `<div class="results-head">
-      <div class="results-title"><a class="back" href="/" data-act="back" aria-label="رجوع">${I('back')}</a><h2>${title}</h2>${mode === 'near' && !state.geo ? '' : `<span class="count">${fmtNum(list.length)} نتيجة</span>`}</div>
+      <div class="results-title"><a class="back" href="/" data-act="back" aria-label="رجوع">${I('back')}</a><h2>${title}</h2>${noGeo ? '' : `<span class="count">${fmtNum(list.length)} نتيجة</span>`}</div>
       ${filters}
     </div>
     ${extra}
-    ${p.m && mode !== 'favs' ? '<div class="map-box" id="map"></div>' : '<div class="list" id="list"></div><div class="sentinel" id="sentinel"></div>'}`;
+    ${noGeo ? '' : p.m && mode !== 'favs' ? '<div class="map-box" id="map"></div>' : '<div class="list" id="list"></div><div class="sentinel" id="sentinel"></div>'}`;
 
+  if (noGeo) { $('#status').textContent = ''; return; }
   if (p.q && !res.phone) scheduleSearchLog(p.q, () => state.index.search(p.q).results.length);
-  if (!list.length && !(mode === 'near' && !state.geo)) {
+  if (!list.length) {
     ($('#list') || $('#map')).outerHTML = emptyState(mode, p);
     return;
   }
