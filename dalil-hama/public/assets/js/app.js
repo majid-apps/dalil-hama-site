@@ -54,7 +54,7 @@ const state = {
 
 // المدير المسجّل دخوله (من هذا المتصفح) يرى أزرار تعديل سريعة تفتح لوحة الإدارة مباشرة؛ الزائر العادي لا يرى شيئاً
 const hasAdminSession = () => { const s = store.get('dh:admin-session'); return !!(s && s.refresh_token); };
-// معاينة «كما يراه الزائر»: ?preview=visitor تُخفي كل أدوات الإدارة طوال الجلسة، ويبقى زر صغير للعودة
+// معاينة «كما يراه الزائر»: ?preview=visitor تُخفي كل أدوات الإدارة طوال جلسة التبويب (بلا زر عودة؛ فتح تطبيق الإدارة يلغيها)
 const previewOn = () => {
   const q = /[?&]preview=visitor/.test(location.search);
   try { if (q) sessionStorage.setItem('dh:preview', '1'); return sessionStorage.getItem('dh:preview') === '1'; } catch { return q; }
@@ -417,9 +417,9 @@ function renderChrome() {
     `<button type="button" data-act="share-site">${I('share')}شارك الدليل</button>`,
   ].filter(Boolean).join('');
   updateFavDot();
-  if (hasAdminSession() && !$('#admin-fab')) {
-    const pv = previewOn();
-    document.body.insertAdjacentHTML('beforeend', `<a class="admin-fab${pv ? ' preview' : ''}" id="admin-fab" href="/admin/">${I(pv ? 'back' : 'settings', 'sm')}${pv ? 'معاينة الزائر — العودة للإدارة' : 'لوحة الإدارة'}</a>`);
+  // معاينة الزائر (?preview=visitor): لا زر ولا أثر للإدارة إطلاقاً، كما يرى الزائر بالضبط؛ العودة من أيقونة تطبيق الإدارة (تُلغي المعاينة عند فتحها)
+  if (adminOn() && !$('#admin-fab')) {
+    document.body.insertAdjacentHTML('beforeend', `<a class="admin-fab" id="admin-fab" href="/admin/">${I('settings', 'sm')}لوحة الإدارة</a>`);
   }
 }
 
