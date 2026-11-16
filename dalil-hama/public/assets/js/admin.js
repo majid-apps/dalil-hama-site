@@ -524,9 +524,11 @@ function renderNavCounts() {
 function deepLink() {
   const [head, query = ''] = location.hash.slice(1).split('?');
   const [v, arg] = head.split('/');
-  if (v !== 'edit' && v !== 'new' && v !== 'rm') return null;
+  if (v !== 'edit' && v !== 'new' && v !== 'rm' && v !== 'sig') return null;
   const q = new URLSearchParams(query);
   if (v === 'rm') return { v, id: Number(q.get('l')) || null, phone: normalizePhone(q.get('p') || '') };
+  // ‎#sig?l=ID&p=الرقم&k=ok|edit|rm: رابط رسالة واتساب التي يرسلها صاحب الرقم من رقمه (v1.14.0): تأكيد أن الطلب من صاحب الرقم
+  if (v === 'sig') return { v, id: Number(q.get('l')) || null, phone: normalizePhone(q.get('p') || ''), kind: ['ok', 'edit', 'rm'].includes(q.get('k')) ? q.get('k') : null };
   return { v, id: Number(arg) || null, preset: { name: (q.get('name') || '').slice(0, 160), phones: q.get('phone') ? [normalizePhone(q.get('phone'))] : [] } };
 }
 
@@ -546,8 +548,8 @@ function route() {
   if (!$('#content')) return; // شاشة الدخول ظاهرة (بعد الخروج أو انتهاء الجلسة): لا شاشة إدارة لنرسمها
   const dl = deepLink();
   let v = location.hash.slice(1).split('?')[0].split('/')[0] || 'dash';
-  if (dl) v = dl.v === 'rm' ? 'inbox' : 'listings';
-  if (dl && dl.v === 'rm') A.inboxTab = 'rep';
+  if (dl) v = dl.v === 'rm' || dl.v === 'sig' ? 'inbox' : 'listings';
+  if (dl && (dl.v === 'rm' || dl.v === 'sig')) A.inboxTab = 'rep';
   if (ALIAS[v]) { A.inboxTab = ALIAS[v][1]; v = ALIAS[v][0]; }
   if (v === 'diag') return viewDiag($('#content'));
   const def = VIEWS.find((x) => x[0] === v) || VIEWS[0];
@@ -561,8 +563,9 @@ function route() {
   fn($('#content'));
   if (dl) {
     // نُرجع العنوان إلى القائمة حتى لا يُعاد فتح النافذة عند التحديث أو الرجوع
-    history.replaceState(null, '', dl.v === 'rm' ? '#inbox' : '#listings');
-    if (dl.v === 'rm') {
+    history.replaceState(null, '', dl.v === 'rm' || dl.v === 'sig' ? '#inbox' : '#listings');
+    if (dl.v === 'sig') confirmSignal(dl);
+    else if (dl.v === 'rm') {
       // رابط «الرقم خطأ» من رسالة واتساب: نافذة تأكيد واحدة لحذف الرقم
       const t = A.byId.get(dl.id);
       if (!dl.phone || !t || !(t.phones || []).includes(dl.phone)) toast('هذا الرقم لم يعد في البطاقة (حُذف سابقاً أو عُدّل)', true);
@@ -797,6 +800,7 @@ function viewDash(el) {
   const pend = A.listings.filter((r) => r.status === 'pending');
   const t = { todo: pend.filter((r) => isCand(r) && !isSent(r)).length, sent: pend.filter((r) => isCand(r) && isSent(r)).length,
     req: pend.filter((r) => !isCand(r)).length, rep: A.reports.filter((r) => r.status === 'open').length,
+    sender: senderReports().length,
     stale: pend.filter((r) => isCand(r) && isSent(r) && (sentDays(r) ?? 0) >= STALE_DAYS).length };
   const task = (href, n, label, hint, ic) => `<a class="task${n ? ' on' : ''}" href="${href}">${I(ic)}<b>${fmtNum(n)}</b><span>${label}<small>${hint}</small></span></a>`;
   el.innerHTML = `
@@ -806,7 +810,7 @@ function viewDash(el) {
         ${task('#cands?tab=todo', t.todo, 'مرشحون للمراسلة', 'أرسل لهم رسالة الموافقة', 'wa')}
         ${task('#cands?tab=sent', t.sent, 'بانتظار ردّهم', t.stale ? `منهم ${fmtNum(t.stale)} منذ أكثر من أسبوع: أعد مراسلتهم` : 'انشر من وافق منهم', 'clock')}
         ${task('#inbox?tab=req', t.req, 'طلبات انضمام', 'راجعها وانشرها', 'inbox')}
-        ${task('#inbox?tab=rep', t.rep, 'بلاغات', 'صحّح أو أخفِ', 'flag')}
+        ${task('#inbox?tab=rep', t.rep, 'بلاغات', t.sender ? `منها ${fmtNum(t.sender)} من جهاز المرسل لا صاحب الرقم` : 'صحّح أو أخفِ', 'flag')}
       </div>` : '<p class="muted" style="margin:0">لا شيء ينتظرك الآن 🎉</p>'}</div>
     <div class="quick-links">
       <a class="btn btn-primary" href="/">${I('external', 'sm')}فتح الدليل العام</a>
@@ -1427,23 +1431,78 @@ async function phoneAction(phone, kind, listingId, after) {
   } catch (err) { toast(`لم يكتمل: ${errMsg(err)}`, true); }
 }
 
+/** رابط ‎#sig من رسالة واتساب وصلتك من رقم صاحب النشاط: بعد تحققك أن المحادثة من الرقم نفسه يُعلَّم البلاغ «مؤكَّداً من واتساب الرقم»
+ *  (admin_confirm_signal، migration 0022؛ يُنشأ إن لم يصل من الرابط) ثم الإجراء المناسب: توثيق، أو فتح التعديل، أو حذف الرقم. */
+async function confirmSignal(dl) {
+  const t = A.byId.get(dl.id);
+  const KIND = { ok: 'موافقة على النشر والتوثيق', edit: 'طلب تعديل', rm: 'الرقم خطأ (حذف)' };
+  if (!dl.kind || !dl.phone || !t) { toast('رابط غير مكتمل أو نشاط غير موجود', true); return; }
+  if (!(t.phones || []).includes(dl.phone)) { toast('هذا الرقم لم يعد في البطاقة (حُذف سابقاً أو عُدّل)', true); return; }
+  const ok = await confirmBox(`<b>${KIND[dl.kind]}</b> لبطاقة «${esc(t.name)}» بالرقم <b dir="ltr">${esc(formatPhone(dl.phone))}</b>.<br><br>هل فتحت هذا الرابط من محادثة واتساب <b>مع هذا الرقم نفسه</b>؟ تحقق من رقم المحادثة ثم أكّد: يُعلَّم الطلب «مؤكَّداً من صاحب الرقم».`, { ok: 'نعم، الرسالة من رقمه' });
+  if (!ok) { toast('لم يُعلَّم الطلب. تحقق من رقم المحادثة أولاً.'); return; }
+  try {
+    await rpc('admin_confirm_signal', { p_listing: dl.id, p_phone: dl.phone, p_kind: dl.kind });
+    const [rows, reps] = await Promise.all([rest(`listings?select=*&id=eq.${dl.id}`), rest(reportsQuery())]);
+    upsertMany(rows);
+    A.reports = reps;
+    toast('📱 عُلّم الطلب مؤكَّداً من صاحب الرقم ✓');
+    refreshStats();
+    renderNavCounts();
+    if (onView('inbox')) route();
+  } catch (err) { toast(`لم يكتمل: ${errMsg(err)}`, true); return; }
+  if (dl.kind === 'rm') phoneAction(dl.phone, 'delete', dl.id, () => route());
+  else if (dl.kind === 'ok') {
+    if (await confirmBox(`توثيق «${esc(t.name)}» الآن بموافقة صاحب الرقم <b dir="ltr">${esc(formatPhone(dl.phone))}</b>؟`, { ok: 'توثيق' })) {
+      try {
+        await rpc('admin_verify_phone', { p_listing: dl.id, p_phone: dl.phone });
+        const [rows, reps] = await Promise.all([rest(`listings?select=*&id=eq.${dl.id}`), rest(reportsQuery())]);
+        upsertMany(rows);
+        A.reports = reps;
+        toast('وُثّق النشاط ✓');
+        refreshStats();
+        renderNavCounts();
+        route();
+      } catch (err) { toast(`لم يكتمل: ${errMsg(err)}`, true); }
+    }
+  } else editListing(dl.id);
+}
+
+/** من أين جاء البلاغ: مؤكَّد من واتساب الرقم، أو من جهاز المرسل، أو من الرابط بلا تأكيد بعد. وعدّ بلاغات المصدر نفسه على بطاقات مختلفة */
+function reportOrigin(r) {
+  if (!r.phone || !['owner_ok', 'owner_edit', 'wrong_number'].includes(r.kind)) return '';
+  const parts = [];
+  if (r.confirmed_at) parts.push('<b style="color:var(--wa)">📱 مؤكَّد: وصل واتساب من الرقم نفسه</b>');
+  else if (r.by_sender) parts.push('<b style="color:var(--danger)">⚠️ من جهاز المرسل، لا صاحب الرقم</b>');
+  else parts.push('<span>⏳ من الرابط، لم يصل تأكيد واتساب من الرقم بعد</span>');
+  if (r.src && r.status === 'open') {
+    const others = new Set(A.reports.filter((x) => x.src === r.src && x.status === 'open' && x.id !== r.id && x.listing_id !== r.listing_id).map((x) => x.listing_id));
+    if (others.size) parts.push(`<b style="color:var(--danger)">⚠️ المصدر نفسه أرسل بلاغات على ${fmtNum(others.size)} بطاقة أخرى</b>`);
+  }
+  return `<div style="font-size:13px">${parts.join(' · ')}</div>`;
+}
+const senderReports = () => A.reports.filter((r) => r.status === 'open' && r.by_sender && !r.confirmed_at);
+
 // ─────────────── البلاغات ───────────────
 
 function viewReports(el) {
   const tab = A.reportTab;
   const rows = A.reports.filter((r) => (tab === 'open' ? r.status === 'open' : r.status !== 'open'));
+  const nSender = senderReports().length;
   el.innerHTML = `<div class="toolbar"><div class="seg-tabs">${['open', 'done'].map((t) => `<button type="button" data-tab="${t}" aria-pressed="${tab === t}">${t === 'open' ? `مفتوحة (${fmtNum(A.reports.filter((r) => r.status === 'open').length)})` : 'المعالَجة'}</button>`).join('')}</div></div>
+    ${tab === 'open' && nSender ? `<div class="warnbox" style="margin-bottom:10px">${I('alert', 'sm')}${fmtNum(nSender)} ${nSender === 1 ? 'بلاغ جاء' : 'بلاغات جاءت'} من جهاز المرسل لا من صاحب الرقم: لا تعتمدها إلا إن وصلك واتساب من الرقم نفسه.</div>` : ''}
     ${rows.length ? rows.map((r) => {
     const l = r.listing_id && A.byId.get(r.listing_id);
     return `<div class="req">
       <div class="req-head"><span class="avatar" style="--hue:${l ? catHue(l.category_id) : 10}">${l ? catIcon(l.category_id) : '🚩'}</span>
         <div style="flex:1;min-width:0"><h3>${esc(REPORT_KIND[r.kind] || r.kind)}${r.listing_name ? ` — ${esc(r.listing_name)}` : ''}</h3><div class="muted" style="font-size:13px">${timeAgo(r.created_at)}${l ? ` · ${phonesHtml(l)}` : ''}${r.held && r.status === 'open' ? ' · <b style="color:var(--danger)">⏸ الرقم موقوف عن الزوار</b>' : ''}</div></div>${st(r.status, REPORT_STATUS)}</div>
+      ${reportOrigin(r)}
       ${r.details ? `<div style="white-space:pre-wrap;background:var(--surface-2);border-radius:12px;padding:10px 12px">${esc(r.details)}</div>` : ''}
       ${r.contact ? `<div class="muted" style="font-size:13.5px">للتواصل مع المُبلِّغ: <bdi dir="ltr">${esc(r.contact)}</bdi></div>` : ''}
       <div class="ops">
         ${r.status === 'open' && r.kind === 'owner_ok' && r.phone && l && (l.phones || []).includes(r.phone) ? `<button class="btn btn-primary" data-verify="${r.id}">${I('verified', 'sm')}توثيق${l.verified ? ' (موثّق أصلاً)' : ''}</button>` : ''}
         ${r.status === 'open' && r.phone && l && (l.phones || []).includes(r.phone) ? `<button class="btn btn-danger" data-rmphone="${r.id}">${I('trash', 'sm')}حذف الرقم <bdi dir="ltr">${esc(formatPhone(r.phone))}</bdi></button>` : ''}
         ${r.status === 'open' && r.phone && r.kind === 'wrong_number' ? `<button class="btn btn-soft" data-okphone="${r.id}">${I('check', 'sm')}الرقم صحيح</button>` : ''}
+        ${r.status === 'open' && r.phone && !r.confirmed_at && ['owner_ok', 'owner_edit', 'wrong_number'].includes(r.kind) && l ? `<button class="btn btn-soft" data-confirm="${r.id}">📱 وصلني واتساب من رقمه</button>` : ''}
         ${r.contact && /^[+\d][\d\s+-]{6,}$/.test(r.contact) ? `<a class="btn btn-wa" href="${waHref(normalizePhone(r.contact), `السلام عليكم، وصلنا بلاغكم عن «${r.listing_name || 'نشاط'}» في دليل حماة 🌿`)}" target="_blank" rel="noopener">${I('wa', 'sm')}ردّ على المبلِّغ</a>` : ''}
         ${l ? `<button class="btn btn-soft" data-edit="${l.id}">${I('edit', 'sm')}تعديل النشاط</button>` : ''}
         ${l && l.status === 'approved' ? `<button class="btn btn-soft" data-hide="${l.id}" data-rid="${r.id}">${I('eye-off', 'sm')}إخفاء النشاط</button>` : ''}
@@ -1459,6 +1518,21 @@ function viewReports(el) {
     const rmp = e.target.closest('[data-rmphone]');
     const okp = e.target.closest('[data-okphone]');
     const vf = e.target.closest('[data-verify]');
+    const cf = e.target.closest('[data-confirm]');
+    if (cf) {
+      // وصلتك رسالة واتساب من الرقم نفسه بلا رابط (أو لم يعمل الرابط): علّم البلاغ مؤكَّداً يدوياً بعد التحقق من رقم المحادثة
+      const rp = A.reports.find((x) => x.id === Number(cf.dataset.confirm));
+      if (!rp || !rp.phone) return;
+      if (!(await confirmBox(`تحققت أن رسالة واتساب وصلتك من الرقم <b dir="ltr">${esc(formatPhone(rp.phone))}</b> نفسه؟`, { ok: 'نعم، من رقمه' }))) return;
+      cf.disabled = true;
+      try {
+        await rpc('admin_confirm_signal', { p_listing: rp.listing_id, p_phone: rp.phone, p_kind: { owner_ok: 'ok', owner_edit: 'edit', wrong_number: 'rm' }[rp.kind] });
+        A.reports = await rest(reportsQuery());
+        toast('📱 عُلّم البلاغ مؤكَّداً من صاحب الرقم ✓');
+        viewReports(el);
+      } catch (err) { cf.disabled = false; toast(`لم يكتمل: ${errMsg(err)}`, true); }
+      return;
+    }
     if (vf) {
       // «توثيق» (migration 0021): verified = true، الرقم مؤكَّد 30 يوماً، ويُغلق بلاغ الموافقة؛ فتعود رسالة الزائر قصيرة
       const rp = A.reports.find((x) => x.id === Number(vf.dataset.verify));
