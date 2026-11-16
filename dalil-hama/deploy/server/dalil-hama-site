@@ -712,6 +712,20 @@ gen_routes() {
 EOF
 }
 
+# رؤوس الأمان: تُكتب في الإعداد مرتين، للصفحات العادية ولصفحة الخطأ (handle_errors لا يرث رؤوس الموقع، فكانت صفحة 404 بلا رؤوس وتُظهر Server)
+sec_headers() {
+  cat <<'EOF'
+			Strict-Transport-Security "max-age=31536000"
+			X-Content-Type-Options "nosniff"
+			X-Frame-Options "SAMEORIGIN"
+			Referrer-Policy "strict-origin-when-cross-origin"
+			Permissions-Policy "camera=(), geolocation=(self), microphone=(self)"
+			Cross-Origin-Opener-Policy "same-origin"
+			Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://tile.openstreetmap.org; font-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; frame-src 'none'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'; upgrade-insecure-requests"
+			-Server
+EOF
+}
+
 write_site_conf() {
   local addresses=$1 tmp=$SITE_CONF.new
   mkdir -p "$ETC"; chmod 755 "$ETC"
@@ -723,14 +737,7 @@ $addresses {
 	encode zstd gzip
 
 	header {
-		Strict-Transport-Security "max-age=31536000"
-		X-Content-Type-Options "nosniff"
-		X-Frame-Options "SAMEORIGIN"
-		Referrer-Policy "strict-origin-when-cross-origin"
-		Permissions-Policy "camera=(), geolocation=(self), microphone=(self)"
-		Cross-Origin-Opener-Policy "same-origin"
-		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://tile.openstreetmap.org; font-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; frame-src 'none'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'; upgrade-insecure-requests"
-		-Server
+$(sec_headers)
 	}
 
 	@revalidate path / /index.html /admin/ /admin/index.html /privacy/ /privacy/index.html /sw.js /manifest.webmanifest /release.txt /robots.txt /sitemap.xml *.js *.css
@@ -749,6 +756,9 @@ $(gen_routes)
 	file_server
 
 	handle_errors {
+		header {
+$(sec_headers)
+		}
 		@missing_page {
 			expression {err.status_code} == 404
 			path_regexp ^/[^.]*$
