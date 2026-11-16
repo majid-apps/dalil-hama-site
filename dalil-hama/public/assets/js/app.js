@@ -17,6 +17,9 @@ const POPULAR_MIN = 10;
  *  النشاط غير الموثّق (it.v): رسالة توثيق (السلام، رابط الدليل، الاسم والتصنيف والعنوان والموقع، «هل أنتم موافقون على النشر؟»)
  *  ورابطها /?l=ID&w=1#p=الرقم يفتح نافذة بثلاثة خيارات لمن وصلته الرسالة (صاحب الرقم حكماً) وللرقم نفسه وحده:
  *  موافق وتوثيق، تعديل، الرقم خطأ (حذف نهائي). كل خيار إشارة إلى الإدارة فتقرّر؛ لا يتغير شيء من الرابط مباشرة.
+ *  الرابط لا يعرف من فتحه (المرسل يراه أيضاً)، فبعد كل خيار يفتح واتساب إلى الإدارة برسالة جاهزة من رقم صاحب النشاط (v1.14.0):
+ *  وصولها من الرقم نفسه هو الإثبات، ورابطها /admin/#sig يعلّم البلاغ «مؤكَّداً». والجهاز الذي أُرسلت منه رسالة التوثيق (dh:wasent)
+ *  يُعدّ جهاز المرسل: تُخفى عنه الخيارات، وإن أصرّ تُعلَّم طلباته «من جهاز المرسل» (p_sender) ولا تُخفي رقماً.
  *  الرقم في ما بعد # لا في الاستعلام: Caddy يخدم الصفحة الثابتة عند ?l=ID&w=1 فقط (معاينة الرابط)، ولا يصل # إلى الخادم.
  *  النشاط الموثّق: رسالة قصيرة وودّية يكمل الزائر كتابتها، وسطر أخير لمن وصلته بالخطأ (الرابط نفسه). */
 const waMsg = (it, ph = '') => {
@@ -359,7 +362,7 @@ function card(it, terms = []) {
     <div class="actions">
       ${phone ? `<a class="btn btn-primary call" href="${telHref(phone)}" data-act="call" aria-label="اتصال">${I('phone', 'sm')}اتصال</a>`
     : `<div class="no-phone"><span>بلا رقم</span><button type="button" data-act="addphone">أضف الرقم</button></div>`}
-      ${wa ? `<a class="btn btn-wa wa" href="${waHref(wa, waMsg(it, wa))}" target="_blank" rel="noopener" data-act="whatsapp">${I('wa', 'sm')}واتساب</a>` : ''}
+      ${wa ? `<a class="btn btn-wa wa" href="${waHref(wa, waMsg(it, wa))}" target="_blank" rel="noopener" data-act="whatsapp" data-ph="${esc(wa)}">${I('wa', 'sm')}واتساب</a>` : ''}
       ${map ? `<a class="btn btn-soft map" href="${esc(map)}" target="_blank" rel="noopener" data-act="map">${I('pin', 'sm')}الموقع</a>` : ''}
       <button class="btn btn-soft share" type="button" data-act="share" aria-label="مشاركة">${I('share', 'sm')}</button>
       ${adminOn() ? `<a class="btn btn-soft" href="/admin/#edit/${it.i}" aria-label="تعديل في الإدارة" title="تعديل في الإدارة">${I('edit', 'sm')}</a>` : ''}
@@ -800,9 +803,35 @@ document.addEventListener('keydown', (e) => {
 
 // ─────────────── نافذة «وصلتكم رسالة من الدليل؟» (/?l=ID&w=1#p=الرقم) ───────────────
 
+/** الجهاز الذي أُرسلت منه رسالة التوثيق إلى رقم: يُعدّ جهاز المرسل لا صاحب الرقم (ذاكرة محلية، 60 يوماً، لا تُرسل لأحد) */
+const WASENT_KEY = 'dh:wasent';
+function markSent(id, ph) {
+  const m = store.get(WASENT_KEY, {}) || {};
+  const cut = Date.now() - 60 * 86400000;
+  for (const k of Object.keys(m)) if (!(m[k] > cut)) delete m[k];
+  m[`${id}:${ph}`] = Date.now();
+  store.set(WASENT_KEY, m);
+}
+const sentHere = (id, ph) => !!((store.get(WASENT_KEY, {}) || {})[`${id}:${ph}`]);
+
+/** رسالة واتساب الجاهزة من صاحب الرقم إلى الإدارة (وصولها من الرقم نفسه يثبت الملكية) ورابطها يعلّم البلاغ مؤكَّداً في الإدارة */
+const OB_WA = {
+  ok: (it, ph) => `موافق على نشر وتوثيق «${it.n}» (#${it.i}) بالرقم ${formatPhone(ph)} في دليل حماة`,
+  edit: (it, ph) => `طلب تعديل بيانات «${it.n}» (#${it.i}) بالرقم ${formatPhone(ph)} في دليل حماة`,
+  rm: (it, ph) => `الرقم خطأ، يرجى حذف الرقم ${formatPhone(ph)} من بطاقة «${it.n}» (#${it.i})`,
+};
+function ownerWaBtn(it, ph, kind, text = '') {
+  const wa = (state.settings.contact || {}).whatsapp;
+  if (!wa) return '';
+  const msg = `${OB_WA[kind](it, ph)}${text ? `\n${text}` : ''}\n${location.origin}/admin/#sig?l=${it.i}&p=${ph}&k=${kind}`;
+  return `<p class="ob-note"><b>خطوة أخيرة لازمة:</b> أرسلوا هذه الرسالة الجاهزة من واتساب هذا الرقم؛ وصولها من رقمكم هو ما يثبت أنكم أصحابه فيُعتمد الطلب.</p>
+    <a class="btn btn-wa btn-block" href="${waHref(wa, msg)}" target="_blank" rel="noopener">${I('wa', 'sm')}أرسلوا التأكيد عبر واتساب</a>`;
+}
+
 /** صندوق صاحب الرقم فوق البطاقة: ثلاثة خيارات للرقم الذي وصلته الرسالة وحده (موافق وتوثيق، تعديل، الرقم خطأ).
- *  بلا رقم في الرابط (رسائل قديمة أو رقم غير موجود) وفي البطاقة أكثر من رقم: يختار الزائر رقمه أولاً. */
-function ownerBoxHtml(it, ph) {
+ *  بلا رقم في الرابط (رسائل قديمة أو رقم غير موجود) وفي البطاقة أكثر من رقم: يختار الزائر رقمه أولاً.
+ *  الجهاز الذي أُرسلت منه الرسالة (المرسل) لا يرى الخيارات إلا بإصرار (force)، وتُعلَّم طلباته «من جهاز المرسل». */
+function ownerBoxHtml(it, ph, force = false) {
   const phones = it.p || [];
   if (!phones.length) return '';
   const sel = phones.includes(ph) ? ph : phones.length === 1 ? phones[0] : '';
@@ -810,15 +839,23 @@ function ownerBoxHtml(it, ph) {
     return `<div class="owner-box" data-ob="1"><p><b>وصلتكم رسالة من «دليل حماة»؟</b> اختاروا الرقم الذي وصلته الرسالة:</p>
       ${phones.map((p) => `<button class="btn btn-soft btn-block" type="button" data-act="ob-pick" data-ph="${esc(p)}"><bdi dir="ltr">${esc(formatPhone(p))}</bdi></button>`).join('')}</div>`;
   }
+  const sender = sentHere(it.i, sel);
+  if (sender && !force) {
+    return `<div class="owner-box" data-ob="1" data-ph="${esc(sel)}">
+      <p><b>هذا الرابط لصاحب الرقم الذي وصلته الرسالة.</b></p>
+      <p>رسالة التوثيق إلى الرقم <bdi dir="ltr">${esc(formatPhone(sel))}</bdi> أُرسلت من هذا الجهاز، فالخيارات (موافقة، تعديل، حذف) لمن استقبلها لا لمن أرسلها.</p>
+      <button class="btn btn-soft btn-block" type="button" data-act="ob-force">أنا صاحب هذا الرقم فعلاً — أظهر الخيارات</button>
+    </div>`;
+  }
   const cat = catOf(it);
   const only = phones.length === 1;
-  return `<div class="owner-box" data-ob="1" data-ph="${esc(sel)}">
+  return `<div class="owner-box" data-ob="1" data-ph="${esc(sel)}"${sender ? ' data-sender="1"' : ''}>
     <p><b>وصلتكم رسالة من «دليل حماة»؟</b></p>
     <p>وجدنا الرقم <bdi dir="ltr">${esc(formatPhone(sel))}</bdi> باسم «${esc(it.n)}»${cat ? ` (${esc(cat.n)})` : ''}${it.d ? `، العنوان: ${esc(it.d)}` : it.a ? `، ${esc(it.a)}` : ''}. هل أنتم موافقون على نشره في الدليل؟</p>
     <button class="btn btn-primary btn-lg btn-block" type="button" data-act="ob-ok">${I('check', 'sm')}موافق — انشروا ووثّقوا</button>
     <button class="btn btn-soft btn-block" type="button" data-act="ob-edit">${I('edit', 'sm')}تعديل البيانات</button>
     <button class="btn btn-danger btn-block" type="button" data-act="ob-del">${I('x', 'sm')}الرقم خطأ — احذفوه نهائياً</button>
-    <p class="ob-note">الخيارات لهذا الرقم وحده${only ? '، وهو الرقم الوحيد في البطاقة فحذفه يحذفها' : '، وتبقى بقية أرقام البطاقة'}. تراجع الإدارة كل طلب قبل اعتماده.</p>
+    <p class="ob-note">الخيارات لهذا الرقم وحده${only ? '، وهو الرقم الوحيد في البطاقة فحذفه يحذفها' : '، وتبقى بقية أرقام البطاقة'}. بعد الاختيار تُرسلون رسالة واتساب جاهزة من رقمكم إلى الإدارة لإثبات أنكم أصحابه، ثم تعتمده الإدارة.</p>
   </div>`;
 }
 
@@ -835,19 +872,21 @@ const OB_ERR = {
 
 /** إشارة صاحب الرقم إلى الإدارة (owner_signal، migration 0021): approve أو edit. لا تغيّر البطاقة؛ الإدارة تقرّر. */
 async function ownerSignal(ob, it, ph, kind, text) {
+  const sender = ob.dataset.sender === '1';
   ob.innerHTML = '<p>جارٍ الإرسال…</p>';
   let r = null;
-  try { r = await rpc('owner_signal', { p_listing: it.i, p_phone: ph, p_kind: kind, p_text: text || null }); } catch { r = null; }
+  try { r = await rpc('owner_signal', { p_listing: it.i, p_phone: ph, p_kind: kind, p_text: text || null, p_sender: sender }); } catch { r = null; }
+  const wa = ownerWaBtn(it, ph, kind === 'approve' ? 'ok' : 'edit', kind === 'edit' ? text : '');
   if (!r || !r.ok) {
-    ownerBoxState(ob, '⚠️', 'تعذّر الإرسال', OB_ERR[r && r.error] || 'تعذّر الاتصال. تحققوا من الإنترنت وحاولوا مجدداً.',
-      `<button class="btn btn-soft btn-block" type="button" data-act="ob-back">رجوع</button>`);
+    ownerBoxState(ob, '⚠️', 'تعذّر الإرسال', (OB_ERR[r && r.error] || 'تعذّر الاتصال. تحققوا من الإنترنت وحاولوا مجدداً.') + (wa && !(r && r.error) ? ' أو أرسلوا طلبكم برسالة واتساب مباشرة:' : ''),
+      `${!(r && r.error) ? wa : ''}<button class="btn btn-soft btn-block" type="button" data-act="ob-back">رجوع</button>`);
     return;
   }
   if (kind === 'approve') {
     ownerBoxState(ob, '✅', r.dup ? 'وصلت موافقتكم من قبل' : 'شكراً لكم، وصلت موافقتكم 🌿',
-      `سيوثّق الدليل الرقم <bdi dir="ltr">${esc(formatPhone(ph))}</bdi> ونشاط «${esc(it.n)}» بعد مراجعة الإدارة، وتظهر عليه علامة «موثّق».`);
+      `سيوثّق الدليل الرقم <bdi dir="ltr">${esc(formatPhone(ph))}</bdi> ونشاط «${esc(it.n)}» بعد وصول تأكيدكم ومراجعة الإدارة، وتظهر عليه علامة «موثّق».`, wa);
   } else {
-    ownerBoxState(ob, '✏️', r.dup ? 'طلب التعديل وصل من قبل' : 'وصل طلب التعديل، شكراً لكم 🌿', 'ستراجعه الإدارة وتحدّث البطاقة بأقرب وقت.');
+    ownerBoxState(ob, '✏️', r.dup ? 'طلب التعديل وصل من قبل' : 'وصل طلب التعديل، شكراً لكم 🌿', 'ستراجعه الإدارة وتحدّث البطاقة بعد وصول تأكيدكم.', wa);
   }
 }
 
@@ -891,11 +930,11 @@ function openItem(id) {
   const phones = (it.p || []).map((p, i) => `<div class="phone-row">
       <div class="num"><bdi dir="ltr">${esc(formatPhone(p))}</bdi><span class="kind">${isMobile(p) ? 'جوال' : 'أرضي'}${i === 0 ? ' · الرقم الأساسي' : ''}</span></div>
       <button class="icon-btn" type="button" data-act="copy" data-val="${esc(p)}" aria-label="نسخ الرقم">${I('copy', 'sm')}</button>
-      ${isMobile(p) && !it.nw ? `<a class="btn btn-wa" href="${waHref(p, waMsg(it, p))}" target="_blank" rel="noopener" data-act="whatsapp" aria-label="واتساب">${I('wa', 'sm')}</a>` : ''}
+      ${isMobile(p) && !it.nw ? `<a class="btn btn-wa" href="${waHref(p, waMsg(it, p))}" target="_blank" rel="noopener" data-act="whatsapp" data-ph="${esc(p)}" aria-label="واتساب">${I('wa', 'sm')}</a>` : ''}
       <a class="btn btn-primary" href="${telHref(p)}" data-act="call">${I('phone', 'sm')}اتصال</a>
     </div>`).join('');
   const waExtra = wa && !(it.p || []).includes(wa)
-    ? `<div class="phone-row"><div class="num"><bdi dir="ltr">${esc(formatPhone(wa))}</bdi><span class="kind">واتساب</span></div><a class="btn btn-wa" href="${waHref(wa, waMsg(it, wa))}" target="_blank" rel="noopener" data-act="whatsapp">${I('wa', 'sm')}مراسلة</a></div>` : '';
+    ? `<div class="phone-row"><div class="num"><bdi dir="ltr">${esc(formatPhone(wa))}</bdi><span class="kind">واتساب</span></div><a class="btn btn-wa" href="${waHref(wa, waMsg(it, wa))}" target="_blank" rel="noopener" data-act="whatsapp" data-ph="${esc(wa)}">${I('wa', 'sm')}مراسلة</a></div>` : '';
   const cur = new URL(location.href);
   const ownerBox = cur.searchParams.get('w') === '1' ? ownerBoxHtml(it, (cur.hash.match(/^#p=(\d{4,15})$/) || [])[1] || '') : '';
   const body = `<div data-id="${it.i}">
@@ -1171,7 +1210,11 @@ document.addEventListener('click', (e) => {
   const id = holder ? Number(holder.dataset.id) : null;
   const it = id ? state.byId.get(id) : null;
 
-  if (actName === 'call' || actName === 'whatsapp' || actName === 'map') { track(id, actName); return; }
+  if (actName === 'call' || actName === 'whatsapp' || actName === 'map') {
+    track(id, actName);
+    if (actName === 'whatsapp' && it && !it.v && act.dataset.ph) markSent(it.i, act.dataset.ph);
+    return;
+  }
   if (actName === 'sos') return;
   if (actName === 'reload') { location.reload(); return; }
   if (actName === 'open' && !(e.ctrlKey || e.metaKey || e.shiftKey || e.button)) { e.preventDefault(); go({ l: id }, { keep: true }); return; }
@@ -1196,30 +1239,29 @@ document.addEventListener('click', (e) => {
   if (ob && it) {
     e.preventDefault();
     const ph = ob.dataset.ph || act.dataset.ph || '';
-    if (actName === 'ob-pick' || actName === 'ob-back') { ob.outerHTML = ownerBoxHtml(it, actName === 'ob-pick' ? act.dataset.ph : ph); return; }
+    if (actName === 'ob-pick' || actName === 'ob-back' || actName === 'ob-force') { ob.outerHTML = ownerBoxHtml(it, actName === 'ob-pick' ? act.dataset.ph : ph, actName === 'ob-force' || ob.dataset.sender === '1'); return; }
     if (actName === 'ob-ok') { ownerSignal(ob, it, ph, 'approve'); return; }
     if (actName === 'ob-edit') { ownerEditForm(ob, it, ph); return; }
     if (actName === 'ob-del') {
       const only = (it.p || []).length === 1;
       ob.innerHTML = `<p><b>حذف الرقم <bdi dir="ltr">${esc(formatPhone(ph))}</bdi> نهائياً من الدليل؟</b></p>
-        <p>${only ? `هو الرقم الوحيد في بطاقة «${esc(it.n)}» فتُحذف البطاقة معه.` : `يُحذف هذا الرقم وحده وتبقى بطاقة «${esc(it.n)}» بأرقامها الأخرى.`} يُخفى الرقم فوراً عن الزوار ما أمكن، وتحذفه الإدارة نهائياً بعد المراجعة فلا يُضاف مرة أخرى.</p>
+        <p>${only ? `هو الرقم الوحيد في بطاقة «${esc(it.n)}» فتُحذف البطاقة معه.` : `يُحذف هذا الرقم وحده وتبقى بطاقة «${esc(it.n)}» بأرقامها الأخرى.`} يُخفى الرقم عن الزوار أسبوعاً فوراً، وتحذفه الإدارة نهائياً بعد وصول تأكيدكم من واتساب فلا يُضاف مرة أخرى.</p>
         <button class="btn btn-danger btn-lg btn-block" type="button" data-act="rmnum" data-ph="${esc(ph)}">${I('x', 'sm')}نعم، الرقم خطأ — احذفوه</button>
         <button class="btn btn-soft btn-block" type="button" data-act="ob-back">رجوع</button>`;
       return;
     }
     if (actName === 'rmnum') {
-      // يُسجَّل بلاغ «الرقم خطأ» فوراً في القاعدة (وقد يُوقَف الرقم مؤقتاً عن الزوار)، ثم رسالة واتساب جاهزة من الرقم نفسه تُثبت الملكية
-      const wa = (state.settings.contact || {}).whatsapp;
-      const msg = `الرقم خطأ، يرجى حذف الرقم ${formatPhone(ph)} من بطاقة «${it.n}» (#${it.i})\n${location.origin}/admin/#rm?l=${it.i}&p=${ph}`;
+      // يُسجَّل بلاغ «الرقم خطأ» فوراً في القاعدة (ويُخفى الرقم أسبوعاً إلا من جهاز المرسل)، ثم رسالة واتساب جاهزة من الرقم نفسه تُثبت الملكية
+      const sender = ob.dataset.sender === '1';
+      const wa = ownerWaBtn(it, ph, 'rm');
       ob.innerHTML = '<p>جارٍ تسجيل طلبكم…</p>';
-      rpc('flag_phone', { p_listing: it.i, p_phone: ph }).catch(() => null).then((r) => {
+      rpc('flag_phone', { p_listing: it.i, p_phone: ph, p_sender: sender }).catch(() => null).then((r) => {
         const ok = r && r.ok;
         ownerBoxState(ob, ok ? '✅' : '⚠️',
           ok ? `سجّلنا طلب حذف الرقم <bdi dir="ltr">${esc(formatPhone(ph))}</bdi>` : `لم يُسجَّل طلب حذف الرقم <bdi dir="ltr">${esc(formatPhone(ph))}</bdi> تلقائياً`,
-          ok ? `${r.held ? 'أخفيناه عن الزوار مؤقتاً، و' : ''}ستحذفه الإدارة نهائياً بعد المراجعة. نعتذر عن الإزعاج 🌿`
+          ok ? `${r.held ? 'أخفيناه عن الزوار أسبوعاً، و' : ''}ستحذفه الإدارة نهائياً بعد وصول تأكيدكم. نعتذر عن الإزعاج 🌿`
             : (OB_ERR[r && r.error] || 'تعذّر الاتصال.') + (wa ? ' يمكنكم إرسال الطلب بالرسالة التالية.' : ''),
-          wa ? `<p class="ob-note">لتسريع الحذف أرسلوا هذه الرسالة الجاهزة من واتساب هذا الرقم؛ وصولها من رقمكم يثبت أنكم أصحابه فيُحذف فوراً. (اختياري)</p>
-            <a class="btn btn-wa btn-block" href="${waHref(wa, msg)}" target="_blank" rel="noopener">${I('wa', 'sm')}أرسل طلب الحذف عبر واتساب</a>` : '');
+          wa);
       });
       return;
     }
