@@ -712,6 +712,24 @@ gen_routes() {
 EOF
 }
 
+# رؤوس الأمان: تُكتب مرة في المسار الرئيسي ومرة داخل handle_errors (Caddy لا يُبقي رؤوس المسار الرئيسي على صفحة الخطأ؛
+# كانت صفحة 404 تخرج بلا رؤوس أمان وبـserver: Caddy — فحص 16/11/2026). $1 = المسافة البادئة.
+security_headers() {
+  local t=$1
+  cat <<EOF
+${t}header {
+${t}	Strict-Transport-Security "max-age=31536000"
+${t}	X-Content-Type-Options "nosniff"
+${t}	X-Frame-Options "SAMEORIGIN"
+${t}	Referrer-Policy "strict-origin-when-cross-origin"
+${t}	Permissions-Policy "camera=(), geolocation=(self), microphone=(self)"
+${t}	Cross-Origin-Opener-Policy "same-origin"
+${t}	Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://tile.openstreetmap.org; font-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; frame-src 'none'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'; upgrade-insecure-requests"
+${t}	-Server
+${t}}
+EOF
+}
+
 write_site_conf() {
   local addresses=$1 tmp=$SITE_CONF.new
   mkdir -p "$ETC"; chmod 755 "$ETC"
@@ -722,16 +740,7 @@ $addresses {
 	root * $BASE/current
 	encode zstd gzip
 
-	header {
-		Strict-Transport-Security "max-age=31536000"
-		X-Content-Type-Options "nosniff"
-		X-Frame-Options "SAMEORIGIN"
-		Referrer-Policy "strict-origin-when-cross-origin"
-		Permissions-Policy "camera=(), geolocation=(self), microphone=(self)"
-		Cross-Origin-Opener-Policy "same-origin"
-		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://tile.openstreetmap.org; font-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; frame-src 'none'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'; upgrade-insecure-requests"
-		-Server
-	}
+$(security_headers '	')
 
 	@revalidate path / /index.html /admin/ /admin/index.html /privacy/ /privacy/index.html /sw.js /manifest.webmanifest /release.txt /robots.txt /sitemap.xml *.js *.css
 	header @revalidate Cache-Control "no-cache"
@@ -749,6 +758,7 @@ $(gen_routes)
 	file_server
 
 	handle_errors {
+$(security_headers '		')
 		@missing_page {
 			expression {err.status_code} == 404
 			path_regexp ^/[^.]*$

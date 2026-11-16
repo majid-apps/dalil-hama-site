@@ -524,10 +524,12 @@ function renderList(p, mode) {
   } else if (!p.q && (mode === 'search' || rural)) {
     list = [...list].sort((a, b) => (b.f || 0) - (a.f || 0) || (b.k || 0) - (a.k || 0) || (b.p ? 1 : 0) - (a.p ? 1 : 0) || a.n.localeCompare(b.n, 'ar'));
   }
+  // «الأقرب إليّ» قبل تحديد الموقع: لا قائمة (كانت تُعرض قائمة غير مرتبة فيظنها الزائر الأقرب — فحص 16/11)
+  const waitGeo = mode === 'near' && !state.geo;
   state.list = list;
   state.terms = res.terms || [];
   state.shown = 0;
-  $('#status').textContent = `${fmtNum(list.length)} نتيجة`;
+  $('#status').textContent = waitGeo ? 'حدّد موقعك لعرض الأقرب إليك' : `${fmtNum(list.length)} نتيجة`;
 
   const cc = catCountsOf(mode);
   const ac = areaCountsOf(mode);
@@ -544,9 +546,10 @@ function renderList(p, mode) {
         <option value="name"${p.s === 'name' ? ' selected' : ''}>أبجدياً</option><option value="new"${p.s === 'new' ? ' selected' : ''}>الأحدث</option></select>` : ''}
     </div>`;
 
-  if (mode === 'near' && !state.geo) {
+  if (waitGeo) {
     extra = `<div class="empty"><div class="big">📍</div><h3>أين أنت الآن؟</h3><p>اسمح بالوصول إلى موقعك لنرتب لك الصيدليات والعيادات والمحلات حسب الأقرب إليك. لا نحفظ موقعك على خوادمنا.</p>
-      <div class="row"><button class="btn btn-primary btn-lg" type="button" data-act="locate">${I('locate')}حدّد موقعي</button></div></div>`;
+      <div class="row"><button class="btn btn-primary btn-lg" type="button" data-act="locate">${I('locate')}حدّد موقعي</button></div>
+      <p><a href="/?v=cats">أو تصفّح حسب التصنيف</a></p></div>`;
   } else if (mode === 'near' || (sort === 'near' && state.geo)) {
     extra = `<div class="geo-bar"><span>${I('locate', 'sm')}المسافات من موقعك ${geoStale() ? 'السابق' : 'الحالي'}</span><button class="btn btn-soft" type="button" data-act="locate">${I('refresh', 'sm')}تحديث موقعي</button></div>`;
     if (geoStale() && !state.geoTried) { state.geoTried = true; locate(true); }
@@ -584,14 +587,15 @@ function renderList(p, mode) {
   if (sos.length) extra = sosHtml(sos, true) + extra;
 
   view.innerHTML = `<div class="results-head">
-      <div class="results-title"><a class="back" href="/" data-act="back" aria-label="رجوع">${I('back')}</a><h2>${title}</h2>${mode === 'near' && !state.geo ? '' : `<span class="count">${fmtNum(list.length)} نتيجة</span>`}</div>
-      ${filters}
+      <div class="results-title"><a class="back" href="/" data-act="back" aria-label="رجوع">${I('back')}</a><h2>${title}</h2>${waitGeo ? '' : `<span class="count">${fmtNum(list.length)} نتيجة</span>`}</div>
+      ${waitGeo ? '' : filters}
     </div>
     ${extra}
-    ${p.m && mode !== 'favs' ? '<div class="map-box" id="map"></div>' : '<div class="list" id="list"></div><div class="sentinel" id="sentinel"></div>'}`;
+    ${waitGeo ? '' : p.m && mode !== 'favs' ? '<div class="map-box" id="map"></div>' : '<div class="list" id="list"></div><div class="sentinel" id="sentinel"></div>'}`;
 
+  if (waitGeo) return;
   if (p.q && !res.phone) scheduleSearchLog(p.q, () => state.index.search(p.q).results.length);
-  if (!list.length && !(mode === 'near' && !state.geo)) {
+  if (!list.length) {
     ($('#list') || $('#map')).outerHTML = emptyState(mode, p);
     return;
   }
