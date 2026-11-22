@@ -91,8 +91,10 @@ export class SearchIndex {
     it._nn = nm;
     it._r = !!(it.a && this.rural && this.rural.has(it.a));
     it._tok = nm.split(' ').map(stem);
-    it._hay = normalize([cat?.n, (it.t || []).join(' '), it.a, it.d, it.e].filter(Boolean).join(' '));
+    // البحث بالاسم وحده (مع اسم التصنيف والوسوم البديلة)؛ لا يُبحث في العنوان ولا النبذة ولا الحي إلا بالقواعد في search()
+    it._hay = normalize([cat?.n, (it.t || []).join(' ')].filter(Boolean).join(' '));
     it._ext = it._hay.split(' ').map(stem);
+    it._adr = normalize([it.a, it.d].filter(Boolean).join(' ')); // للعبارات المكانية فقط («سوق الحدادين»)
     it._dig = (it.p || []).map((p) => p.replace(/\D/g, '')).join(' ');
     it._hasPhone = !!(it.p && it.p.length);
     it._pop = it.k ? Math.min(4, Math.log2(1 + it.k)) : 0;
@@ -140,6 +142,16 @@ export class SearchIndex {
     ));
 
     const qn = normalize(q);
+    // استعلام كله اسم حي («الحاضر»، «حي القصور»): يُعرض نشاط هذا الحي وحده، لا ما ذُكر الحي في اسمه أو عنوانه
+    if (areaHits.every((s) => s.size) && catHits.every((s) => !s.size)) {
+      const names = [...areaHits[0]].filter((n) => areaHits.every((s) => s.has(n)));
+      if (names.length) {
+        const results = pool.filter((it) => names.includes(it.a)).sort((a, b) => (b._pop - a._pop) || a.n.localeCompare(b.n, 'ar'));
+        if (results.length) return { results, cats: [], areas: names.slice(0, 3), fuzzy: false, terms: origStems };
+      }
+    }
+    // الحي يُستعمل شرطاً مع التصنيف فقط («صيدلية الحاضر»)؛ كلمة اسمية معه («كلية الشريعة») تعني بحثاً بالاسم وحده
+    const useArea = areaHits.every((s, i) => s.size || catHits[i].size);
     const placeQuery = qn.includes(' ') && PLACE.has(terms[0]);
     const scored = [];
     for (const it of pool) {
@@ -148,7 +160,7 @@ export class SearchIndex {
       // الاسم يبدأ بالعبارة كاملة («جامعة حماة»): مقصود بعينه
       const fullName = it._nn === qn || (qn.includes(' ') && it._nn.startsWith(qn + ' '));
       // «سوق الحدادين»… بالعبارة كاملة في العنوان: بحث عن مكان لا عن تصنيف
-      const phrase = placeQuery && it._hay.includes(qn);
+      const phrase = placeQuery && it._adr.includes(qn);
       for (let i = 0; i < stems.length; i++) {
         const s = origStems[i];
         let sc = 0;
@@ -160,9 +172,10 @@ export class SearchIndex {
         if (catHits[i].has(it.c)) sc = sc ? sc + 4 : 8;
         // الكلمة تدل على تصنيف والنشاط من تصنيف آخر: تطابق الاسم عَرَضي («دكتور بطاطا» ليس طبيباً)
         else if (sc && catHits[i].size && !fullName) sc = Math.min(sc, 7);
-        if (!sc && areaHits[i].has(it.a)) sc = 5;
+        if (!sc && useArea && areaHits[i].has(it.a)) sc = 5;
         // كلمة تدل على تصنيف لا تكفيها مطابقة العنوان («مقابل صيدلية...» ليس صيدلية)
-        if (!sc && (phrase || !catHits[i].size) && s.length >= 2 && it._ext.some((x) => x.startsWith(s))) sc = 3;
+        if (!sc && phrase) sc = 3;
+        else if (!sc && !catHits[i].size && s.length >= 2 && it._ext.some((x) => x.startsWith(s))) sc = 3;
         if (!sc) { ok = false; break; }
         total += sc;
       }
@@ -198,7 +211,7 @@ export class SearchIndex {
           if (s.length < 3) continue;
           if (catHits[i].has(it.c) || fuzzyCat[i].has(it.c)) total += 8;
           else if (it._tok.some((tk) => tk.startsWith(s))) { total += catHits[i].size || fuzzyCat[i].size ? 3 : 6; if (nameTerm[i]) nameHit = true; }
-          else if (areaHits[i].has(it.a)) total += 4;
+          else if (useArea && areaHits[i].has(it.a)) total += 4;
           else if (s.length >= 5 && it._tok.some((tk) => near(tk, s))) { total += 3; if (nameTerm[i]) nameHit = true; }
           else if (it._ext.some((x) => x.startsWith(s))) total += 1;
         }
