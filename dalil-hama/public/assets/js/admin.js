@@ -1505,6 +1505,42 @@ function reportOrigin(r) {
   }
   return `<div style="font-size:13px">${parts.join(' · ')}</div>`;
 }
+/** طلب تعديل صاحب الرقم: أسطر «الحقل: القديم ← الجديد» (ownerEditText في app.js؛ «—» = فارغ). يُعرض مختصراً ويُعتمد بزر */
+const EDIT_LINE = /^(الاسم|العنوان|الرقم): (.*) ← (.*)$/;
+const EDIT_FIELD = { الاسم: 'name', العنوان: 'address', الرقم: 'phone' };
+const reportEdits = (r) => (r.kind === 'owner_edit' ? (r.details || '').split('\n').map((l) => EDIT_LINE.exec(l.trim())).filter(Boolean)
+  .map((m) => ({ label: m[1], field: EDIT_FIELD[m[1]], from: m[2] === '—' ? '' : m[2].trim(), to: m[3] === '—' ? '' : m[3].trim() })) : []);
+/** الكلمات المتغيرة فقط: «الحاضر الصغير، دهلة من…» ← «…دخلة من…» = «دهلة» ← «دخلة» */
+function wordDiff(a, b) {
+  const x = a.split(/\s+/), y = b.split(/\s+/);
+  let i = 0;
+  while (i < x.length && i < y.length && x[i] === y[i]) i++;
+  let j = 0;
+  while (j < x.length - i && j < y.length - i && x[x.length - 1 - j] === y[y.length - 1 - j]) j++;
+  return { from: x.slice(i, x.length - j).join(' '), to: y.slice(i, y.length - j).join(' ') };
+}
+function editText(c) {
+  if (!c.from) return `${c.label}: إضافة «${esc(c.to)}»`;
+  if (!c.to) return `${c.label}: حذف «${esc(c.from)}»`;
+  const d = wordDiff(c.from, c.to);
+  if (d.from && d.to && d.from.length + d.to.length < c.from.length + c.to.length) return `${c.label}: استبدال «<b>${esc(d.from)}</b>» بـ«<b>${esc(d.to)}</b>»`;
+  if (!d.from && d.to) return `${c.label}: إضافة «<b>${esc(d.to)}</b>»`;
+  if (d.from && !d.to) return `${c.label}: حذف «<b>${esc(d.from)}</b>»`;
+  return `${c.label}: «${esc(c.from)}» ← «<b>${esc(c.to)}</b>»`;
+}
+/** هل طُبّق التغيير على البطاقة؟ (القيمة الحالية = الجديدة) */
+const editApplied = (c, l) => (c.field === 'phone' ? (l.phones || []).includes(normalizePhone(c.to)) && !(l.phones || []).includes(c.from) : (l[c.field] || '') === c.to);
+/** المطلوب فقط: التغييرات مختصرة والملاحظة، والرسالة الكاملة مطويّة */
+function reportBody(r) {
+  if (!r.details) return '';
+  const box = 'background:var(--surface-2);border-radius:12px;padding:10px 12px';
+  const ed = reportEdits(r);
+  const note = r.kind === 'owner_edit' ? (r.details.split('\n').find((l) => l.startsWith('ملاحظة: ')) || '') : '';
+  if (!ed.length && !note) return `<div style="white-space:pre-wrap;${box}">${esc(r.details)}</div>`;
+  const l = r.listing_id && A.byId.get(r.listing_id);
+  return `<div style="${box}">${ed.map((c) => `<div>✏️ ${editText(c)}${l && editApplied(c, l) ? ' <span class="muted">✓ مطبّق</span>' : ''}</div>`).join('')}${note ? `<div>💬 ${esc(note)}</div>` : ''}
+    <details style="margin-top:6px"><summary class="muted" style="cursor:pointer;font-size:13px">الرسالة كاملة</summary><div style="white-space:pre-wrap;font-size:13px;margin-top:4px">${esc(r.details)}</div></details></div>`;
+}
 const senderReports = () => A.reports.filter((r) => r.status === 'open' && r.by_sender && !r.confirmed_at);
 
 // ─────────────── البلاغات ───────────────
@@ -1526,7 +1562,7 @@ function viewReports(el) {
       <div class="req-head"><span class="avatar" style="--hue:${l ? catHue(l.category_id) : 10}">${l ? catIcon(l.category_id) : '🚩'}</span>
         <div style="flex:1;min-width:0"><h3>${esc(REPORT_KIND[r.kind] || r.kind)}${r.listing_name ? ` — ${esc(r.listing_name)}` : ''}</h3><div class="muted" style="font-size:13px">${timeAgo(r.created_at)}${l ? ` · ${phonesHtml(l)}` : ''}${r.held && r.status === 'open' ? ' · <b style="color:var(--danger)">⏸ الرقم موقوف عن الزوار</b>' : ''}</div></div>${st(r.status, REPORT_STATUS)}</div>
       ${reportOrigin(r)}
-      ${r.details ? `<div style="white-space:pre-wrap;background:var(--surface-2);border-radius:12px;padding:10px 12px">${esc(r.details)}</div>` : ''}
+      ${reportBody(r)}
       ${(() => {
         const g = reportLoc(r);
         if (!g) return '';
@@ -1542,6 +1578,7 @@ function viewReports(el) {
       })()}
       ${r.contact ? `<div class="muted" style="font-size:13.5px">للتواصل مع المُبلِّغ: <bdi dir="ltr">${esc(r.contact)}</bdi></div>` : ''}
       <div class="ops">
+        ${l && reportEdits(r).some((c) => !editApplied(c, l)) ? `<button class="btn btn-primary" data-applyedit="${r.id}">${I('check', 'sm')}اعتماد التعديل</button>` : ''}
         ${r.status === 'open' && r.kind === 'owner_ok' && r.phone && l && (l.phones || []).includes(r.phone) ? `<button class="btn btn-primary" data-verify="${r.id}">${I('verified', 'sm')}توثيق${l.verified ? ' (موثّق أصلاً)' : ''}</button>` : ''}
         ${r.status === 'open' && r.phone && l && (l.phones || []).includes(r.phone) ? `<button class="btn btn-danger" data-rmphone="${r.id}">${I('trash', 'sm')}حذف الرقم <bdi dir="ltr">${esc(formatPhone(r.phone))}</bdi></button>` : ''}
         ${r.status === 'open' && r.phone && r.kind === 'wrong_number' ? `<button class="btn btn-soft" data-okphone="${r.id}">${I('check', 'sm')}الرقم صحيح</button>` : ''}
@@ -1563,6 +1600,37 @@ function viewReports(el) {
     const vf = e.target.closest('[data-verify]');
     const cf = e.target.closest('[data-confirm]');
     const sl = e.target.closest('[data-setloc]');
+    const ae = e.target.closest('[data-applyedit]');
+    if (ae) {
+      // اعتماد طلب تعديل صاحب الرقم: يطبّق الاسم/العنوان/الرقم الجديد على البطاقة ويغلق البلاغ، مع سطر في الملاحظة
+      const rp = A.reports.find((x) => x.id === Number(ae.dataset.applyedit));
+      const l0 = rp && A.byId.get(rp.listing_id);
+      const ed = rp && l0 ? reportEdits(rp).filter((c) => !editApplied(c, l0)) : [];
+      if (!ed.length) return;
+      if (!(await confirmBox(`تطبيق هذا التعديل على «${esc(l0.name)}»؟<br>${ed.map(editText).join('<br>')}${rp.by_sender && !rp.confirmed_at ? '<br><b>تنبيه:</b> الطلب من جهاز المرسل ولم يصل تأكيد واتساب من الرقم.' : ''}`, { ok: 'طبّق التعديل' }))) return;
+      ae.disabled = true;
+      try {
+        const body = {};
+        for (const c of ed) {
+          if (c.field === 'phone') {
+            const to = normalizePhone(c.to);
+            const cur = body.phones || [...(l0.phones || [])];
+            const i = cur.indexOf(c.from);
+            if (to && !cur.includes(to)) { if (i >= 0) cur[i] = to; else cur.push(to); } else if (!to && i >= 0) cur.splice(i, 1);
+            body.phones = cur;
+          } else body[c.field] = c.to || null;
+        }
+        body.admin_note = `${l0.admin_note ? `${l0.admin_note}\n` : ''}✏️ ${new Date().toISOString().slice(0, 10)} اعتُمد تعديل صاحب الرقم (بلاغ #${rp.id}): ${ed.map((c) => `${c.label} «${c.from || '—'}» ← «${c.to || '—'}»`).join('؛ ')}`;
+        const [row] = await rest(`listings?id=eq.${l0.id}`, { method: 'PATCH', body, headers: rep });
+        upsertLocal(row);
+        if (rp.status === 'open') await rest(`reports?id=eq.${rp.id}`, { method: 'PATCH', body: { status: 'resolved', resolved_at: new Date().toISOString() }, headers: { Prefer: 'return=minimal' } });
+        A.reports = await rest(reportsQuery());
+        toast('طُبّق التعديل على البطاقة ✓');
+        renderNavCounts();
+        viewReports(el);
+      } catch (err) { ae.disabled = false; toast(`لم يُحفظ: ${errMsg(err)}`, true); }
+      return;
+    }
     if (sl) {
       // اعتماد موقع المحل الذي أرسله صاحب الرقم: الإحداثيات فقط (رابط الخريطة القديم يبقى)، مع سطر في الملاحظة
       const rp = A.reports.find((x) => x.id === Number(sl.dataset.setloc));
