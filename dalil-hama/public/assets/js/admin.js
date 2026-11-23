@@ -1,6 +1,6 @@
 // دليل حماة — لوحة الإدارة
 import {
-  request, ApiError, esc, fmtNum, store, debounce, normalizePhone, formatPhone, isMobile, waHref, telHref, timeAgo, normalize, safeUrl,
+  request, ApiError, esc, fmtNum, store, debounce, normalizePhone, formatPhone, isMobile, waHref, telHref, timeAgo, normalize, safeUrl, distance,
 } from './core.js';
 import { SearchIndex } from './search.js';
 
@@ -1509,6 +1509,11 @@ const senderReports = () => A.reports.filter((r) => r.status === 'open' && r.by_
 
 // ─────────────── البلاغات ───────────────
 
+/** «📍 موقع المحل: lat,lng (دقة ±N م)»: سطر يرسله صاحب الرقم من جواله وهو في المحل (app.js وowner.js)، ويُعتمد بزر */
+const LOC_RE = /📍 موقع المحل: (-?\d{1,2}\.\d+),(-?\d{1,3}\.\d+)(?: \(دقة ±(\d+) م\))?/;
+const reportLoc = (r) => { const m = LOC_RE.exec(r.details || ''); return m ? { lat: Number(m[1]), lng: Number(m[2]), acc: m[3] ? Number(m[3]) : null } : null; };
+const inHamaArea = (lat, lng) => lat >= 34.4 && lat <= 35.6 && lng >= 36.2 && lng <= 37.6; // حماة وريفها (أوسع من inHama للمدينة)
+
 function viewReports(el) {
   const tab = A.reportTab;
   const rows = A.reports.filter((r) => (tab === 'open' ? r.status === 'open' : r.status !== 'open'));
@@ -1522,6 +1527,19 @@ function viewReports(el) {
         <div style="flex:1;min-width:0"><h3>${esc(REPORT_KIND[r.kind] || r.kind)}${r.listing_name ? ` — ${esc(r.listing_name)}` : ''}</h3><div class="muted" style="font-size:13px">${timeAgo(r.created_at)}${l ? ` · ${phonesHtml(l)}` : ''}${r.held && r.status === 'open' ? ' · <b style="color:var(--danger)">⏸ الرقم موقوف عن الزوار</b>' : ''}</div></div>${st(r.status, REPORT_STATUS)}</div>
       ${reportOrigin(r)}
       ${r.details ? `<div style="white-space:pre-wrap;background:var(--surface-2);border-radius:12px;padding:10px 12px">${esc(r.details)}</div>` : ''}
+      ${(() => {
+        const g = reportLoc(r);
+        if (!g) return '';
+        const same = l && l.lat === g.lat && l.lng === g.lng;
+        const far = l && l.lat != null && !same ? Math.round(distance(l.lat, l.lng, g.lat, g.lng)) : null;
+        return `<div class="ops" style="margin-top:6px">
+          <a class="btn btn-soft" href="https://www.google.com/maps?q=${g.lat},${g.lng}" target="_blank" rel="noopener">${I('map', 'sm')}فتح الموقع</a>
+          ${l && !same ? `<button class="btn btn-primary" data-setloc="${r.id}">📍 اعتماد الموقع</button>` : ''}
+          ${same ? '<span class="muted">✓ هذا موقع البطاقة الآن</span>' : ''}</div>
+          ${!inHamaArea(g.lat, g.lng) ? `<div class="warnbox">${I('alert', 'sm')}الموقع خارج حماة وريفها: ربما لم يكن صاحب الرقم في المحل.</div>` : ''}
+          ${g.acc != null && g.acc > 100 ? `<div class="warnbox">${I('alert', 'sm')}دقة الموقع ضعيفة (±${fmtNum(g.acc)} م).</div>` : ''}
+          ${far != null ? `<div class="muted" style="font-size:13.5px">يبعد ${fmtNum(far)} م عن الموقع الحالي للبطاقة.</div>` : ''}`;
+      })()}
       ${r.contact ? `<div class="muted" style="font-size:13.5px">للتواصل مع المُبلِّغ: <bdi dir="ltr">${esc(r.contact)}</bdi></div>` : ''}
       <div class="ops">
         ${r.status === 'open' && r.kind === 'owner_ok' && r.phone && l && (l.phones || []).includes(r.phone) ? `<button class="btn btn-primary" data-verify="${r.id}">${I('verified', 'sm')}توثيق${l.verified ? ' (موثّق أصلاً)' : ''}</button>` : ''}
@@ -1544,6 +1562,24 @@ function viewReports(el) {
     const okp = e.target.closest('[data-okphone]');
     const vf = e.target.closest('[data-verify]');
     const cf = e.target.closest('[data-confirm]');
+    const sl = e.target.closest('[data-setloc]');
+    if (sl) {
+      // اعتماد موقع المحل الذي أرسله صاحب الرقم: الإحداثيات فقط (رابط الخريطة القديم يبقى)، مع سطر في الملاحظة
+      const rp = A.reports.find((x) => x.id === Number(sl.dataset.setloc));
+      const g = rp && reportLoc(rp);
+      const l0 = rp && A.byId.get(rp.listing_id);
+      if (!g || !l0) return;
+      if (!(await confirmBox(`اعتماد هذا الموقع لـ«${esc(l0.name)}» على الخريطة؟${rp.by_sender ? '<br><b>تنبيه:</b> الطلب من جهاز المرسل لا صاحب الرقم.' : ''}${!inHamaArea(g.lat, g.lng) ? '<br><b>تنبيه:</b> الموقع خارج حماة وريفها.' : ''}`, { ok: 'اعتمد الموقع' }))) return;
+      sl.disabled = true;
+      try {
+        const note = `${l0.admin_note ? `${l0.admin_note}\n` : ''}📍 ${new Date().toISOString().slice(0, 10)} موقع من صاحب الرقم (بلاغ #${rp.id}${g.acc != null ? `، دقة ±${g.acc} م` : ''})${l0.lat != null ? `؛ القديم ${l0.lat},${l0.lng}` : ''}`;
+        const [row] = await rest(`listings?id=eq.${l0.id}`, { method: 'PATCH', body: { lat: g.lat, lng: g.lng, admin_note: note }, headers: rep });
+        upsertLocal(row);
+        toast('اعتُمد الموقع ✓ — أغلق البلاغ بـ«تمت المعالجة» إن انتهى');
+        viewReports(el);
+      } catch (err) { sl.disabled = false; toast(`لم يُحفظ: ${errMsg(err)}`, true); }
+      return;
+    }
     if (cf) {
       // وصلتك رسالة واتساب من الرقم نفسه بلا رابط (أو لم يعمل الرابط): علّم البلاغ مؤكَّداً يدوياً بعد التحقق من رقم المحادثة
       const rp = A.reports.find((x) => x.id === Number(cf.dataset.confirm));

@@ -895,12 +895,47 @@ async function ownerSignal(ob, it, ph, kind, text) {
   }
 }
 
+/** موقع المحل من جوال صاحبه وهو فيه: يُرسل سطراً في طلب التعديل (لا يُحفظ على الجهاز)، والإدارة تعتمده بزر «اعتماد الموقع».
+ *  صيغة السطر ثابتة لأن الإدارة تقرؤها (LOC_RE في admin.js وowner.js). */
+const locLine = (p) => `📍 موقع المحل: ${p.lat.toFixed(6)},${p.lng.toFixed(6)} (دقة ±${Math.round(p.acc)} م)`;
+const SHOP_LOC_HTML = `<div class="ob-loc" style="border:1px dashed var(--line);border-radius:14px;padding:10px 12px;margin:4px 0 12px">
+      <p style="margin:0 0 4px"><b>📍 موقع المحل على الخريطة</b> <em>(اختياري)</em></p>
+      <p class="ob-note" style="margin:0 0 8px">⚠️ اضغطوا الزر وأنتم <b>داخل المحل أو المعمل أو العيادة أو الصيدلية نفسها</b>، لا في البيت ولا في الطريق: موقع جوالكم في هذه اللحظة هو ما سيظهر للناس على الخريطة.</p>
+      <label style="display:flex;gap:8px;align-items:center;margin:0 0 8px;font-weight:600"><input type="checkbox" name="inshop" style="width:22px;height:22px;flex:none">أنا الآن داخل المحل</label>
+      <button class="btn btn-soft btn-block" type="button" data-act="ob-loc">📍 أرسل موقع المحل الآن</button>
+      <p class="ob-loc-st" aria-live="polite" style="margin:6px 0 0"></p>
+      <input type="hidden" name="loc">
+    </div>`;
+function shopLocate(f) {
+  const st = f.querySelector('.ob-loc-st');
+  const btn = f.querySelector('[data-act="ob-loc"]');
+  const say = (t, bad = false) => { st.innerHTML = t; st.style.color = bad ? 'var(--danger)' : ''; };
+  if (!f.elements.inshop.checked) { say('ضعوا علامة ✓ على «أنا الآن داخل المحل» أولاً.', true); return; }
+  if (!navigator.geolocation) { say('هذا المتصفح لا يدعم تحديد الموقع.', true); return; }
+  btn.disabled = true;
+  say('جارٍ تحديد الموقع… اسمحوا للمتصفح باستعمال الموقع إن سألكم.');
+  navigator.geolocation.getCurrentPosition((pos) => {
+    btn.disabled = false;
+    const p = { lat: pos.coords.latitude, lng: pos.coords.longitude, acc: pos.coords.accuracy || 0 };
+    f.elements.loc.value = locLine(p);
+    btn.textContent = '📍 إعادة تحديد الموقع';
+    say(p.acc > 100
+      ? `حُدّد الموقع لكن بدقة ضعيفة (±${fmtNum(Math.round(p.acc))} م). شغّلوا «الموقع الدقيق» في الجوال وقفوا قرب الباب ثم أعيدوا، أو أرسلوه كما هو.`
+      : `✓ حُدّد موقع المحل (دقة ±${fmtNum(Math.round(p.acc))} م). سيُرسل مع طلب التعديل.`, p.acc > 100);
+    f.querySelector('.form-error').hidden = true;
+  }, (err) => {
+    btn.disabled = false;
+    say(err.code === 1 ? 'لم يُسمح باستعمال الموقع. اسمحوا به من إعدادات المتصفح ثم أعيدوا.' : 'تعذّر تحديد الموقع. شغّلوا الموقع (GPS) في الجوال ثم أعيدوا.', true);
+  }, { enableHighAccuracy: true, timeout: 25000, maximumAge: 0 });
+}
+
 function ownerEditForm(ob, it, ph) {
   ob.innerHTML = `<p><b>تعديل بيانات «${esc(it.n)}»</b></p>
     <form id="ob-edit" novalidate>
       <label class="field"><span>اسم النشاط</span><input class="input" name="name" maxlength="160" value="${esc(it.n)}"></label>
       <label class="field"><span>الرقم</span><input class="input" name="phone" inputmode="tel" dir="ltr" maxlength="20" value="${esc(ph)}"></label>
       <label class="field"><span>العنوان</span><input class="input" name="address" maxlength="400" value="${esc(it.d || '')}" placeholder="الحي، الشارع، بجانب…"></label>
+      ${SHOP_LOC_HTML}
       <label class="field"><span>ملاحظة <em>(اختياري)</em></span><textarea class="input" name="note" maxlength="500" rows="2" placeholder="مثال: الاسم الصحيح… / رقم إضافي… / تغيّر العنوان إلى…"></textarea></label>
       <div class="form-error" hidden></div>
       <button class="btn btn-primary btn-lg btn-block" type="submit">${I('check', 'sm')}إرسال التعديل</button>
@@ -917,6 +952,7 @@ function ownerEditText(it, ph, fd) {
   if (v('phone') && normalizePhone(v('phone')) !== ph) lines.push(`الرقم: ${ph} ← ${normalizePhone(v('phone'))}`);
   if (v('address') !== (it.d || '')) lines.push(`العنوان: ${it.d || '—'} ← ${v('address') || '—'}`);
   if (v('note')) lines.push(`ملاحظة: ${v('note')}`);
+  if (v('loc')) lines.push(v('loc'));
   return lines.join('\n');
 }
 
@@ -1121,7 +1157,7 @@ document.addEventListener('submit', (e) => {
   const ph = ob.dataset.ph || '';
   const text = ownerEditText(it, ph, new FormData(f));
   const err = f.querySelector('.form-error');
-  if (text.length < 5) { err.textContent = 'لم يتغيّر شيء. عدّلوا معلومة أو اكتبوا ملاحظة.'; err.hidden = false; return; }
+  if (text.length < 5) { err.textContent = 'لم يتغيّر شيء. عدّلوا معلومة أو اكتبوا ملاحظة أو أرسلوا موقع المحل.'; err.hidden = false; return; }
   ownerSignal(ob, it, ph, 'edit', text);
 });
 // يختفي تنبيه «لم يتغيّر شيء» مع أول تعديل
@@ -1248,6 +1284,7 @@ document.addEventListener('click', (e) => {
     if (actName === 'ob-pick' || actName === 'ob-back' || actName === 'ob-force') { ob.outerHTML = ownerBoxHtml(it, actName === 'ob-pick' ? act.dataset.ph : ph, actName === 'ob-force' || ob.dataset.sender === '1'); return; }
     if (actName === 'ob-ok') { ownerSignal(ob, it, ph, 'approve'); return; }
     if (actName === 'ob-edit') { ownerEditForm(ob, it, ph); return; }
+    if (actName === 'ob-loc') { shopLocate(act.closest('form')); return; }
     if (actName === 'ob-del') {
       const only = (it.p || []).length === 1;
       ob.innerHTML = `<p><b>حذف الرقم <bdi dir="ltr">${esc(formatPhone(ph))}</bdi> نهائياً من الدليل؟</b></p>
