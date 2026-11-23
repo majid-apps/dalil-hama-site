@@ -942,8 +942,9 @@ function openItem(id) {
     ? `<div class="phone-row"><div class="num"><bdi dir="ltr">${esc(formatPhone(wa))}</bdi><span class="kind">واتساب</span></div><a class="btn btn-wa" href="${waHref(wa, waMsg(it, wa))}" target="_blank" rel="noopener" data-act="whatsapp" data-ph="${esc(wa)}">${I('wa', 'sm')}مراسلة</a></div>` : '';
   const cur = new URL(location.href);
   const ownerBox = cur.searchParams.get('w') === '1' ? ownerBoxHtml(it, (cur.hash.match(/^#p=(\d{4,15})$/) || [])[1] || '') : '';
-  const body = `<div data-id="${it.i}">
-    ${ownerBox}
+  // رابط رسالة التوثيق (w=1): صاحب الرقم يرى خياراته الثلاثة وحدها، بلا أزرار الزائر (اتصال، مفضلة، إبلاغ، طلب تعديل…)؛ والبطاقة كاملة برابط تحتها
+  const body = ownerBox ? `<div data-id="${it.i}">${ownerBox}
+    <a class="btn btn-ghost btn-block" href="/?l=${it.i}">عرض بطاقة النشاط في الدليل</a></div>` : `<div data-id="${it.i}">
     <div class="detail-hero" style="--hue:${catHue(cat)}">
       <div class="avatar" aria-hidden="true">${cat ? cat.ic : '📍'}</div>
       <div style="min-width:0"><h3>${esc(splitName(it.n)[0])}${it.v ? `<span class="badge" title="موثّق">${I('verified')}</span>` : ''}</h3>${splitName(it.n)[1] ? `<div class="detail-sub">${esc(splitName(it.n)[1])}</div>` : ''}
