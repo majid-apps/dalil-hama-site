@@ -837,19 +837,21 @@ const OB_WA = {
   ok: (it, ph) => `موافق على نشر وتوثيق «${it.n}» (#${it.i}) بالرقم ${formatPhone(ph)} في دليل حماة`,
   edit: (it, ph) => `طلب تعديل بيانات «${it.n}» (#${it.i}) بالرقم ${formatPhone(ph)} في دليل حماة`,
   rm: (it, ph) => `الرقم خطأ، يرجى حذف الرقم ${formatPhone(ph)} من بطاقة «${it.n}» (#${it.i})`,
+  card: (it, ph) => `البطاقة غير صحيحة، يرجى حذف بطاقة «${it.n}» (#${it.i}) نهائياً (رقمي ${formatPhone(ph)})`,
 };
-function ownerWaBtn(it, ph, kind, text = '') {
+// kind: نوع رابط #sig في الإدارة (ok|edit|rm)؛ say: نص الرسالة من OB_WA (افتراضياً kind)
+function ownerWaBtn(it, ph, kind, text = '', say = kind) {
   const wa = (state.settings.contact || {}).whatsapp;
   if (!wa) return '';
-  const msg = `${OB_WA[kind](it, ph)}${text ? `\n${text}` : ''}\n${location.origin}/admin/#sig?l=${it.i}&p=${ph}&k=${kind}`;
+  const msg = `${OB_WA[say](it, ph)}${text ? `\n${text}` : ''}\n${location.origin}/admin/#sig?l=${it.i}&p=${ph}&k=${kind}`;
   return `<p class="ob-note"><b>خطوة أخيرة لازمة:</b> أرسلوا هذه الرسالة الجاهزة من واتساب هذا الرقم؛ وصولها من رقمكم هو ما يثبت أنكم أصحابه فيُعتمد الطلب.</p>
     <a class="btn btn-wa btn-block" href="${waHref(wa, msg)}" target="_blank" rel="noopener">${I('wa', 'sm')}أرسلوا التأكيد عبر واتساب</a>`;
 }
 
-/** صندوق صاحب الرقم فوق البطاقة: ثلاثة خيارات للرقم الذي وصلته الرسالة وحده (موافق وتوثيق، تعديل، الرقم خطأ).
- *  بلا رقم في الرابط (رسائل قديمة أو رقم غير موجود) وفي البطاقة أكثر من رقم: يختار الزائر رقمه أولاً.
- *  الجهاز الذي أُرسلت منه الرسالة (المرسل) لا يرى الخيارات إلا بإصرار (force)، وتُعلَّم طلباته «من جهاز المرسل». */
-function ownerBoxHtml(it, ph, force = false) {
+/** صندوق صاحب الرقم تحت البطاقة: «أنا صاحب الرقم» وأربعة خيارات مباشرة (v1.15.8): موافق وتوثيق (والموقع صحيح)، تعديل وإضافة الموقع،
+ *  الرقم خطأ (إزالته من البطاقة)، البطاقة غير صحيحة (حذفها كاملة). بلا رقم في الرابط وفي البطاقة أكثر من رقم: يختار رقمه أولاً.
+ *  الجهاز الذي أُرسلت منه الرسالة (المرسل) يرى الخيارات نفسها مع تنبيه، وتُعلَّم طلباته «من جهاز المرسل» (data-sender) فلا تُخفي رقماً. */
+function ownerBoxHtml(it, ph) {
   const phones = it.p || [];
   if (!phones.length) return '';
   const sel = phones.includes(ph) ? ph : phones.length === 1 ? phones[0] : '';
@@ -858,22 +860,17 @@ function ownerBoxHtml(it, ph, force = false) {
       ${phones.map((p) => `<button class="btn btn-soft btn-block" type="button" data-act="ob-pick" data-ph="${esc(p)}"><bdi dir="ltr">${esc(formatPhone(p))}</bdi></button>`).join('')}</div>`;
   }
   const sender = sentHere(it.i, sel);
-  if (sender && !force) {
-    return `<div class="owner-box" data-ob="1" data-ph="${esc(sel)}">
-      <p><b>هذا الرابط لصاحب الرقم الذي وصلته الرسالة.</b></p>
-      <p>رسالة التوثيق إلى الرقم <bdi dir="ltr">${esc(formatPhone(sel))}</bdi> أُرسلت من هذا الجهاز، فالخيارات (موافقة، تعديل، حذف) لمن استقبلها لا لمن أرسلها.</p>
-      <button class="btn btn-soft btn-block" type="button" data-act="ob-force">أنا صاحب هذا الرقم فعلاً — أظهر الخيارات</button>
-    </div>`;
-  }
-  const cat = catOf(it);
   const only = phones.length === 1;
+  const hasMap = !!mapHref(it);
   return `<div class="owner-box" data-ob="1" data-ph="${esc(sel)}"${sender ? ' data-sender="1"' : ''}>
-    <p><b>وصلتكم رسالة من «دليل حماة»؟</b></p>
-    <p>وجدنا الرقم <bdi dir="ltr">${esc(formatPhone(sel))}</bdi> باسم «${esc(it.n)}»${cat ? ` (${esc(cat.n)})` : ''}${it.d ? `، العنوان: ${esc(it.d)}` : it.a ? `، ${esc(it.a)}` : ''}. هل أنتم موافقون على نشره في الدليل؟</p>
-    <button class="btn btn-primary btn-lg btn-block" type="button" data-act="ob-ok">${I('check', 'sm')}موافق — انشروا ووثّقوا</button>
-    <button class="btn btn-soft btn-block" type="button" data-act="ob-edit">${I('edit', 'sm')}تعديل البيانات</button>
-    <button class="btn btn-danger btn-block" type="button" data-act="ob-del">${I('x', 'sm')}الرقم خطأ — احذفوه نهائياً</button>
-    <p class="ob-note">الخيارات لهذا الرقم وحده${only ? '، وهو الرقم الوحيد في البطاقة فحذفه يحذفها' : '، وتبقى بقية أرقام البطاقة'}. بعد الاختيار تُرسلون رسالة واتساب جاهزة من رقمكم إلى الإدارة لإثبات أنكم أصحابه، ثم تعتمده الإدارة.</p>
+    <p><b>أنا صاحب الرقم <bdi dir="ltr">${esc(formatPhone(sel))}</bdi></b></p>
+    <p class="ob-note" style="margin-top:0">البطاقة أعلاه كما تظهر للناس في «دليل حماة». اختاروا:</p>
+    <button class="btn btn-primary btn-lg btn-block" type="button" data-act="ob-ok">${I('check', 'sm')}موافق — انشروا ووثّقوا${hasMap ? '، والموقع صحيح' : ''}</button>
+    <button class="btn btn-soft btn-block" type="button" data-act="ob-edit">${I('edit', 'sm')}تعديل البيانات وإضافة الموقع الصحيح</button>
+    <button class="btn btn-danger btn-block" type="button" data-act="ob-del">${I('x', 'sm')}الرقم خطأ — أزيلوه من البطاقة</button>
+    <button class="btn btn-danger btn-block" type="button" data-act="ob-delcard">${I('trash', 'sm')}البطاقة غير صحيحة — احذفوها نهائياً</button>
+    <p class="ob-note">الخيارات لهذا الرقم${only ? '، وهو الرقم الوحيد في البطاقة فإزالته تحذفها' : '، وتبقى بقية أرقام البطاقة إلا إن طلبتم حذفها كاملة'}. بعد الاختيار تُرسلون رسالة واتساب جاهزة من رقمكم إلى الإدارة لإثبات أنكم أصحابه، ثم تعتمده الإدارة.</p>
+    ${sender ? '<p class="ob-note">⚠️ أُرسلت رسالة التوثيق إلى هذا الرقم من هذا الجهاز: إن لم تكونوا أصحابه فلا تختاروا شيئاً. الطلب من هنا لا يُعتمد إلا بعد وصول تأكيد واتساب من الرقم نفسه.</p>' : ''}
   </div>`;
 }
 
@@ -889,12 +886,12 @@ const OB_ERR = {
 };
 
 /** إشارة صاحب الرقم إلى الإدارة (owner_signal، migration 0021): approve أو edit. لا تغيّر البطاقة؛ الإدارة تقرّر. */
-async function ownerSignal(ob, it, ph, kind, text) {
+async function ownerSignal(ob, it, ph, kind, text, say = '') {
   const sender = ob.dataset.sender === '1';
   ob.innerHTML = '<p>جارٍ الإرسال…</p>';
   let r = null;
   try { r = await rpc('owner_signal', { p_listing: it.i, p_phone: ph, p_kind: kind, p_text: text || null, p_sender: sender }); } catch { r = null; }
-  const wa = ownerWaBtn(it, ph, kind === 'approve' ? 'ok' : 'edit', kind === 'edit' ? text : '');
+  const wa = ownerWaBtn(it, ph, kind === 'approve' ? 'ok' : 'edit', kind === 'edit' && !say ? text : '', say || (kind === 'approve' ? 'ok' : 'edit'));
   if (!r || !r.ok) {
     ownerBoxState(ob, '⚠️', 'تعذّر الإرسال', (OB_ERR[r && r.error] || 'تعذّر الاتصال. تحققوا من الإنترنت وحاولوا مجدداً.') + (wa && !(r && r.error) ? ' أو أرسلوا طلبكم برسالة واتساب مباشرة:' : ''),
       `${!(r && r.error) ? wa : ''}<button class="btn btn-soft btn-block" type="button" data-act="ob-back">رجوع</button>`);
@@ -903,6 +900,8 @@ async function ownerSignal(ob, it, ph, kind, text) {
   if (kind === 'approve') {
     ownerBoxState(ob, '✅', r.dup ? 'وصلت موافقتكم من قبل' : 'شكراً لكم، وصلت موافقتكم 🌿',
       `سيوثّق الدليل الرقم <bdi dir="ltr">${esc(formatPhone(ph))}</bdi> ونشاط «${esc(it.n)}» بعد وصول تأكيدكم ومراجعة الإدارة، وتظهر عليه علامة «موثّق».`, wa);
+  } else if (say === 'card') {
+    ownerBoxState(ob, '🗑', r.dup ? 'طلب الحذف وصل من قبل' : 'وصل طلب حذف البطاقة، شكراً لكم 🌿', 'ستحذفها الإدارة بعد وصول تأكيدكم. نعتذر عن الإزعاج.', wa);
   } else {
     ownerBoxState(ob, '✏️', r.dup ? 'طلب التعديل وصل من قبل' : 'وصل طلب التعديل، شكراً لكم 🌿', 'ستراجعه الإدارة وتحدّث البطاقة بعد وصول تأكيدكم.', wa);
   }
@@ -1291,11 +1290,11 @@ document.addEventListener('click', (e) => {
     return;
   }
   // نافذة صاحب الرقم: الخيارات الثلاثة للرقم الذي وصلته الرسالة (data-ph على الصندوق)
-  const ob = actName && (actName.startsWith('ob-') || actName === 'rmnum') ? act.closest('.owner-box') : null;
+  const ob = actName && (actName.startsWith('ob-') || actName === 'rmnum' || actName === 'rmcard') ? act.closest('.owner-box') : null;
   if (ob && it) {
     e.preventDefault();
     const ph = ob.dataset.ph || act.dataset.ph || '';
-    if (actName === 'ob-pick' || actName === 'ob-back' || actName === 'ob-force') { ob.outerHTML = ownerBoxHtml(it, actName === 'ob-pick' ? act.dataset.ph : ph, actName === 'ob-force' || ob.dataset.sender === '1'); return; }
+    if (actName === 'ob-pick' || actName === 'ob-back') { ob.outerHTML = ownerBoxHtml(it, actName === 'ob-pick' ? act.dataset.ph : ph); return; }
     if (actName === 'ob-ok') { ownerSignal(ob, it, ph, 'approve'); return; }
     if (actName === 'ob-edit') { ownerEditForm(ob, it, ph); return; }
     if (actName === 'ob-loc') { shopLocate(act.closest('form')); return; }
@@ -1307,16 +1306,29 @@ document.addEventListener('click', (e) => {
         <button class="btn btn-soft btn-block" type="button" data-act="ob-back">رجوع</button>`;
       return;
     }
-    if (actName === 'rmnum') {
+    if (actName === 'ob-delcard') {
+      const only = (it.p || []).length === 1;
+      ob.innerHTML = `<p><b>حذف بطاقة «${esc(it.n)}» نهائياً من الدليل؟</b></p>
+        <p>${only ? 'تُخفى البطاقة عن الزوار أسبوعاً فوراً، وتحذفها الإدارة نهائياً بعد وصول تأكيدكم من واتساب فلا يُضاف رقمها مرة أخرى.' : 'يصل طلبكم إلى الإدارة فتحذف البطاقة بكل أرقامها بعد وصول تأكيدكم من واتساب.'}</p>
+        <button class="btn btn-danger btn-lg btn-block" type="button" data-act="rmcard">${I('trash', 'sm')}نعم، البطاقة غير صحيحة — احذفوها</button>
+        <button class="btn btn-soft btn-block" type="button" data-act="ob-back">رجوع</button>`;
+      return;
+    }
+    if (actName === 'rmcard' && (it.p || []).length > 1) {
+      // بطاقة بأكثر من رقم: طلب حذف كامل يصل إلى «البلاغات» (owner_signal edit)، والإدارة تقرّر
+      ownerSignal(ob, it, ph, 'edit', '🗑 طلب حذف البطاقة كاملة: صاحب الرقم يقول إن البطاقة غير صحيحة — احذفوها نهائياً من الدليل.', 'card');
+      return;
+    }
+    if (actName === 'rmnum' || actName === 'rmcard') {
       // يُسجَّل بلاغ «الرقم خطأ» فوراً في القاعدة (ويُخفى الرقم أسبوعاً إلا من جهاز المرسل)، ثم رسالة واتساب جاهزة من الرقم نفسه تُثبت الملكية
       const sender = ob.dataset.sender === '1';
-      const wa = ownerWaBtn(it, ph, 'rm');
+      const wa = ownerWaBtn(it, ph, 'rm', '', actName === 'rmcard' ? 'card' : 'rm');
       ob.innerHTML = '<p>جارٍ تسجيل طلبكم…</p>';
       rpc('flag_phone', { p_listing: it.i, p_phone: ph, p_sender: sender }).catch(() => null).then((r) => {
         const ok = r && r.ok;
         ownerBoxState(ob, ok ? '✅' : '⚠️',
-          ok ? `سجّلنا طلب حذف الرقم <bdi dir="ltr">${esc(formatPhone(ph))}</bdi>` : `لم يُسجَّل طلب حذف الرقم <bdi dir="ltr">${esc(formatPhone(ph))}</bdi> تلقائياً`,
-          ok ? `${r.held ? 'أخفيناه عن الزوار أسبوعاً، و' : ''}ستحذفه الإدارة نهائياً بعد وصول تأكيدكم. نعتذر عن الإزعاج 🌿`
+          ok ? (actName === 'rmcard' ? `سجّلنا طلب حذف بطاقة «${esc(it.n)}»` : `سجّلنا طلب حذف الرقم <bdi dir="ltr">${esc(formatPhone(ph))}</bdi>`) : `لم يُسجَّل الطلب تلقائياً`,
+          ok ? (actName === 'rmcard' ? `${r.held ? 'أخفيناها عن الزوار أسبوعاً، و' : ''}ستحذفها الإدارة نهائياً بعد وصول تأكيدكم. نعتذر عن الإزعاج 🌿` : `${r.held ? 'أخفيناه عن الزوار أسبوعاً، و' : ''}ستحذفه الإدارة نهائياً بعد وصول تأكيدكم. نعتذر عن الإزعاج 🌿`)
             : (OB_ERR[r && r.error] || 'تعذّر الاتصال.') + (wa ? ' يمكنكم إرسال الطلب بالرسالة التالية.' : ''),
           wa);
       });
