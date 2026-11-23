@@ -800,17 +800,18 @@ function viewDash(el) {
   const pend = A.listings.filter((r) => r.status === 'pending');
   const t = { todo: pend.filter((r) => isCand(r) && !isSent(r)).length, sent: pend.filter((r) => isCand(r) && isSent(r)).length,
     req: pend.filter((r) => !isCand(r)).length, rep: A.reports.filter((r) => r.status === 'open').length,
-    sender: senderReports().length,
+    sender: senderReports().length, edit: A.listings.filter(isEdit).length,
     stale: pend.filter((r) => isCand(r) && isSent(r) && (sentDays(r) ?? 0) >= STALE_DAYS).length };
   const task = (href, n, label, hint, ic) => `<a class="task${n ? ' on' : ''}" href="${href}">${I(ic)}<b>${fmtNum(n)}</b><span>${label}<small>${hint}</small></span></a>`;
   el.innerHTML = `
     <div class="panel tasks-panel" style="margin-top:0"><h2>${I('check')}مهام اليوم</h2>
       ${backupAgeDays() === null || backupAgeDays() >= BACKUP_DAYS ? `<div class="warnbox" style="margin-bottom:10px">${I('alert', 'sm')}${backupAgeDays() === null ? 'لم تأخذ نسخة احتياطية من هذا الجهاز بعد.' : `مضى ${fmtNum(backupAgeDays())} يوماً على آخر نسخة احتياطية.`} <a href="#io" style="font-weight:700;color:var(--brand)">خذ نسخة كاملة الآن</a></div>` : ''}
-      ${t.todo + t.sent + t.req + t.rep ? `<div class="tasks">
+      ${t.todo + t.sent + t.req + t.rep + t.edit ? `<div class="tasks">
         ${task('#cands?tab=todo', t.todo, 'مرشحون للمراسلة', 'أرسل لهم رسالة الموافقة', 'wa')}
         ${task('#cands?tab=sent', t.sent, 'بانتظار ردّهم', t.stale ? `منهم ${fmtNum(t.stale)} منذ أكثر من أسبوع: أعد مراسلتهم` : 'انشر من وافق منهم', 'clock')}
         ${task('#inbox?tab=req', t.req, 'طلبات انضمام', 'راجعها وانشرها', 'inbox')}
         ${task('#inbox?tab=rep', t.rep, 'بلاغات', t.sender ? `منها ${fmtNum(t.sender)} من جهاز المرسل لا صاحب الرقم` : 'صحّح أو أخفِ', 'flag')}
+        ${t.edit ? task('#cands?tab=edit', t.edit, 'بطاقات عُدّلت', 'أشعر أصحابها بالتعديل', 'edit') : ''}
       </div>` : '<p class="muted" style="margin:0">لا شيء ينتظرك الآن 🎉</p>'}</div>
     <div class="quick-links">
       <a class="btn btn-primary" href="/">${I('external', 'sm')}فتح الدليل العام</a>
@@ -870,6 +871,10 @@ const LATER_NOTE = '🔎 قائمة البحث: ينقصه رقم أو عنوا�
 const isLater = (r) => r.status === 'hidden' && (r.tags || []).includes(LATER_TAG);
 const laterPatch = (r) => ({ status: 'hidden', tags: [...new Set([...(r.tags || []), LATER_TAG])], admin_note: ((r.admin_note || '').includes('🔎 قائمة البحث') ? r.admin_note : `${r.admin_note ? `${r.admin_note}\n` : ''}${LATER_NOTE}`) });
 const unlaterPatch = (r) => ({ status: 'pending', tags: (r.tags || []).filter((t) => t !== LATER_TAG), admin_note: (r.admin_note || '').split('\n').filter((l) => !l.includes('🔎 قائمة البحث')).join('\n').trim() || null });
+// «تعديل»: بطاقة منشورة عُدّلت بياناتها (من قائمة أرسلها المدير) وتنتظر إشعار صاحبها؛ علامتها سطر يبدأ بـ«✏️ تعديل» في الملاحظة، ويُزال بـ«تمت المراجعة»
+const EDIT_MARK = '✏️ تعديل';
+const isEdit = (r) => r.status === 'approved' && (r.admin_note || '').split('\n').some((l) => l.startsWith(EDIT_MARK));
+const uneditPatch = (r) => ({ admin_note: (r.admin_note || '').split('\n').filter((l) => !l.startsWith(EDIT_MARK)).join('\n').trim() || null });
 const PEND_PAGE = 40;
 
 /** ضمّ أرقام مرشح إلى بطاقة منشورة (يكمل الناقص فيها) ثم حذف المرشح. بلا targetId: نافذة بحث لاختيار البطاقة */
@@ -991,6 +996,7 @@ async function attachMany(cands) {
 
 function drawCandBulk(box, { curRows, redraw, el }) {
   const draw = () => {
+    if (A.candTab === 'edit') { box.innerHTML = ''; return; } // بطاقات منشورة: لا نشر ولا ضمّ جماعي لها
     const n = A.candSel.size;
     const tabBtn = el.querySelector('[data-ctab="sel"]');
     if (tabBtn) tabBtn.textContent = `المحدّدون (${fmtNum(n)})`;
@@ -1067,14 +1073,15 @@ function viewPending(el, mode = 'req') {
   const cand = mode === 'cand';
   const all = A.listings.filter((r) => r.status === 'pending' && cand === isCand(r)).sort((a, b) => b.id - a.id);
   const later = cand ? A.listings.filter(isLater).sort((a, b) => b.id - a.id) : [];
-  if (!all.length && !later.length) {
+  const edits = cand ? A.listings.filter(isEdit).sort((a, b) => b.id - a.id) : [];
+  if (!all.length && !later.length && !edits.length) {
     el.innerHTML = cand
       ? `<div class="empty"><div class="big">📋</div><h3>لا يوجد مرشحون</h3><p>الأرقام التي تستوردها «كمرشحين» تظهر هنا للتواصل مع أصحابها قبل النشر. استخدمها من «استيراد وتصدير».</p></div>`
       : `<div class="empty"><div class="big">🎉</div><h3>لا توجد طلبات معلّقة</h3><p>كل طلبات الإضافة تمت مراجعتها.</p></div>`;
     return;
   }
-  const n = { todo: all.filter((r) => !isSent(r)).length, sent: all.filter(isSent).length, all: all.length, later: later.length };
-  el.innerHTML = `${cand ? `<div class="toolbar"><div class="seg-tabs">${[['todo', 'لم يُراسَل'], ['sent', 'بانتظار الرد'], ['all', 'الكل'], ['later', 'قائمة البحث'], ['sel', 'المحدّدون']]
+  const n = { todo: all.filter((r) => !isSent(r)).length, sent: all.filter(isSent).length, all: all.length, later: later.length, edit: edits.length };
+  el.innerHTML = `${cand ? `<div class="toolbar"><div class="seg-tabs">${[['todo', 'لم يُراسَل'], ['sent', 'بانتظار الرد'], ['all', 'الكل'], ['later', 'قائمة البحث'], ['edit', 'تعديل'], ['sel', 'المحدّدون']]
     .map(([k, l]) => `<button type="button" data-ctab="${k}" aria-pressed="${A.candTab === k}">${l} (${fmtNum(k === 'sel' ? A.candSel.size : n[k])})</button>`).join('')}</div>
     <input class="input grow" id="cand-q" type="search" placeholder="ابحث بالاسم أو جزء من الرقم…" value="${esc(A.candQ)}"></div><div id="cand-bulk"></div>` : ''}<div id="pend-list"></div>`;
   if (cand) for (const id of [...A.candSel]) { const r = A.byId.get(id); if (!r || r.status !== 'pending') A.candSel.delete(id); }
@@ -1082,11 +1089,11 @@ function viewPending(el, mode = 'req') {
   const byPhone = new Map();
   for (const x of A.listings) if (x.status === 'approved') for (const p of x.phones || []) { if (!byPhone.has(p)) byPhone.set(p, []); byPhone.get(p).push(x); }
   const curRows = () => {
-    let rows = cand && A.candTab === 'later' ? later : all;
+    let rows = cand && A.candTab === 'later' ? later : cand && A.candTab === 'edit' ? edits : all;
     if (cand) {
       const q = normalize(A.candQ);
       const qd = A.candQ.replace(/\D/g, '');
-      const inTab = (r) => (A.candTab === 'later' ? true : A.candTab === 'all' ? true : A.candTab === 'sel' ? A.candSel.has(r.id) : (A.candTab === 'sent') === isSent(r));
+      const inTab = (r) => (['later', 'edit', 'all'].includes(A.candTab) ? true : A.candTab === 'sel' ? A.candSel.has(r.id) : (A.candTab === 'sent') === isSent(r));
       rows = rows.filter((r) => inTab(r) && (!q || normalize(r.name).includes(q) || (qd.length >= 3 && (r.phones || []).some((p) => p.includes(qd)))));
     }
     return rows;
@@ -1102,8 +1109,8 @@ function viewPending(el, mode = 'req') {
       const targets = cand ? [...new Set([...(r.admin_note || '').matchAll(/#(\d+)/g)].map((m) => Number(m[1])))]
         .map((id) => A.byId.get(id)).filter((x) => x && x.status === 'approved' && x.id !== r.id).slice(0, 2) : [];
       return `<div class="req" data-id="${r.id}">
-      <div class="req-head">${cand ? `<input type="checkbox" data-csel="${r.id}" aria-label="تحديد"${A.candSel.has(r.id) ? ' checked' : ''} style="width:22px;height:22px;flex:none">` : ''}<span class="avatar" style="--hue:${catHue(r.category_id)}">${catIcon(r.category_id)}</span>
-        <div style="flex:1;min-width:0"><h3>${esc(r.name)}</h3><div class="muted" style="font-size:13px">${esc(catName(r.category_id))} · ${timeAgo(r.created_at)} · #${r.id}</div></div>${isLater(r) ? '<span class="st hidden">قائمة البحث</span>' : cand && isSent(r) ? '<span class="st hidden">بانتظار الرد</span>' : st(r.status)}</div>
+      <div class="req-head">${cand && !isEdit(r) ? `<input type="checkbox" data-csel="${r.id}" aria-label="تحديد"${A.candSel.has(r.id) ? ' checked' : ''} style="width:22px;height:22px;flex:none">` : ''}<span class="avatar" style="--hue:${catHue(r.category_id)}">${catIcon(r.category_id)}</span>
+        <div style="flex:1;min-width:0"><h3>${esc(r.name)}</h3><div class="muted" style="font-size:13px">${esc(catName(r.category_id))} · ${timeAgo(r.created_at)} · #${r.id}</div></div>${isEdit(r) ? '<span class="st hidden">تعديل</span>' : isLater(r) ? '<span class="st hidden">قائمة البحث</span>' : cand && isSent(r) ? '<span class="st hidden">بانتظار الرد</span>' : st(r.status)}</div>
       <dl class="kv">
         <dt>الأرقام</dt><dd>${phonesHtml(r)}</dd>
         ${r.area || r.address ? `<dt>العنوان</dt><dd>${esc([r.area, r.address].filter(Boolean).join('، '))}</dd>` : ''}
@@ -1114,7 +1121,12 @@ function viewPending(el, mode = 'req') {
         ${r.admin_note ? `<dt>ملاحظات</dt><dd style="white-space:pre-wrap">${esc(r.admin_note)}</dd>` : ''}
       </dl>
       ${dupIds.length ? `<div class="warnbox">${I('alert', 'sm')}الرقم موجود مسبقاً في: ${dupIds.map((d) => `<a href="#" data-edit="${d.id}" style="font-weight:700">${esc(d.name)}</a>`).join('، ')}</div>` : ''}
-      ${isLater(r) ? `<div class="ops">
+      ${isEdit(r) ? `<div class="ops">
+        ${mob ? `<a class="btn btn-wa" href="${waHref(mob, CONSENT_MSG(r, ownerLink(tok)))}" target="_blank" rel="noopener" data-owner="${r.id}" data-ph="${esc(mob)}" data-tok="${tok}">${I('wa', 'sm')}إشعار صاحب الرقم</a>` : ''}
+        ${r.phones && r.phones[0] ? `<a class="btn btn-soft" href="${telHref(r.phones[0])}">${I('phone', 'sm')}اتصال</a>` : ''}
+        <button class="btn btn-primary" data-unedit="${r.id}">${I('check', 'sm')}تمت المراجعة</button>
+        <button class="btn btn-soft" data-edit="${r.id}">${I('edit', 'sm')}تعديل</button>
+      </div></div>` : isLater(r) ? `<div class="ops">
         <button class="btn btn-primary" data-unlater="${r.id}">${I('check', 'sm')}إعادة للمراجعة</button>
         <button class="btn btn-soft" data-edit="${r.id}">${I('edit', 'sm')}تعديل (أضف الرقم أو العنوان)</button>
         <button class="btn btn-danger" data-reject="${r.id}">${I('x', 'sm')}استبعاد</button>
@@ -1161,6 +1173,19 @@ function viewPending(el, mode = 'req') {
       rest(`listings?id=eq.${r0.id}`, { method: 'PATCH', body: { admin_note: note }, headers: rep, keepalive: true })
         .then(([row]) => { upsertLocal(row); toast('سُجّلت «أُرسلت» ✓ — التراجع من «بانتظار الرد»'); again(); })
         .catch((err) => toast(errMsg(err), true));
+      return;
+    }
+    const ue = e.target.closest('[data-unedit]');
+    if (ue) {
+      const r2 = A.byId.get(Number(ue.dataset.unedit));
+      if (!r2) return;
+      const body = uneditPatch(r2);
+      upsertLocal({ ...r2, ...body });
+      toast('خرجت من «تعديل» ✓');
+      again();
+      rest(`listings?id=eq.${r2.id}`, { method: 'PATCH', body, headers: rep })
+        .then(([row]) => upsertLocal(row))
+        .catch((err) => { upsertLocal(r2); toast(`لم يُحفظ: ${errMsg(err)}`, true); again(); });
       return;
     }
     const lt = e.target.closest('[data-later],[data-unlater]');
@@ -1374,7 +1399,7 @@ function hashParam(k) { return new URLSearchParams(location.hash.split('?')[1] |
 
 function viewCands(el) {
   A.candQ = ''; // كل فتح جديد للشاشة يبدأ دون بحث سابق
-  if (['todo', 'sent', 'all', 'later'].includes(hashParam('tab'))) A.candTab = hashParam('tab');
+  if (['todo', 'sent', 'all', 'later', 'edit'].includes(hashParam('tab'))) A.candTab = hashParam('tab');
   el.innerHTML = `<div class="warnbox" style="margin-bottom:12px">${I('info', 'sm')}المرشحون أرقام للمراجعة فقط، لا تظهر في الدليل. أرسل رسالة الموافقة ثم اضغط «أرسلتُ الرسالة» لينتقل إلى «بانتظار الرد». وحين يرد صاحب الرقم ابحث عنه بجزء من رقمه، واضغط «وافق — انشر».</div><div id="cand-box"></div>`;
   viewPending($('#cand-box'), 'cand');
 }
