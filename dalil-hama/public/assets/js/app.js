@@ -1,6 +1,6 @@
 // دليل حماة — الواجهة العامة
 import {
-  rpc, esc, formatPhone, isMobile, telHref, waHref, fmtNum, debounce, store, bigGet, bigSet,
+  rpc, esc, formatPhone, isMobile, telHref, waHref, fmtNum, store, bigGet, bigSet,
   distance, fmtDistance, mapHref, normalizePhone, safeUrl, normalize, toLatinDigits,
 } from './core.js';
 import { SearchIndex, highlight, stem } from './search.js';
@@ -377,6 +377,7 @@ function setHeroCompact(compact) {
 
 function render(p) {
   if (!state.loaded) return;
+  if (!p.q) flushSearchLog(); // ترك البحث إلى صفحة أخرى
   const view = $('#view');
   // ريف حماة: v=rural، أو رابط حيّ لبلدة ريفية (?a=سلمية) يُفتح في بوابة الريف
   const rural = state.hasRural && (p.v === 'rural' || (!p.v && p.a && state.ruralNames.has(p.a)));
@@ -595,7 +596,7 @@ function renderList(p, mode) {
     ${waitGeo ? '' : p.m && mode !== 'favs' ? '<div class="map-box" id="map"></div>' : '<div class="list" id="list"></div><div class="sentinel" id="sentinel"></div>'}`;
 
   if (waitGeo) return;
-  if (p.q && !res.phone) scheduleSearchLog(p.q, () => state.index.search(p.q).results.length);
+  if (p.q && !res.phone) noteSearch(p.q, () => state.index.search(p.q).results.length);
   if (!list.length) {
     ($('#list') || $('#map')).outerHTML = emptyState(mode, p);
     return;
@@ -628,13 +629,25 @@ const io = new IntersectionObserver((entries) => {
   if (entries.some((e) => e.isIntersecting) && state.shown < state.list.length) appendPage();
 }, { rootMargin: '800px 0px' });
 
-// n دالة: العدد (في كل الأنشطة لا في نطاق القائمة) يُحسب عند الإرسال فقط لا مع كل حرف
-const scheduleSearchLog = debounce((q, n) => {
+// سجل البحث (log_search): ما بحث عنه الزائر فعلاً، لا أجزاء الكلمات أثناء الكتابة («ميساء ال» قبل «ميساء»).
+// يُسجَّل البحث الأخير عند «بحث» في لوحة المفاتيح، أو فتح نتيجة أو الاتصال بها، أو تركه إلى بحث آخر أو صفحة أخرى،
+// أو إغلاق الصفحة (فتُسجَّل البحوث بلا نتيجة أيضاً). n دالة: العدد في كل الأنشطة يُحسب عند الإرسال فقط.
+let pendingSearch = null;
+function flushSearchLog() {
+  const p = pendingSearch;
+  pendingSearch = null;
+  if (!p || p.q === state.lastLogged) return;
+  state.lastLogged = p.q;
+  rpc('log_search', { q: p.q, results: p.n() }, { keepalive: true }).catch(() => {});
+}
+function noteSearch(q, n) {
   const t = (q || '').trim();
-  if (t.length < 2 || t === state.lastLogged || t !== params().q) return;
-  state.lastLogged = t;
-  rpc('log_search', { q: t, results: n() }).catch(() => {});
-}, 1800);
+  const prev = pendingSearch && pendingSearch.q;
+  // ما زال يكتب أو يمحو الكلمة نفسها: يُستبدل البحث المعلّق بلا تسجيل. بحث مختلف: يُسجَّل السابق أولاً
+  if (prev && prev !== t && !t.startsWith(prev) && !prev.startsWith(t)) flushSearchLog();
+  pendingSearch = t.length >= 2 ? { q: t, n } : null;
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushSearchLog(); });
 
 // ─────────────── الخريطة (تُحمَّل عند الطلب) ───────────────
 
@@ -1252,6 +1265,7 @@ document.addEventListener('click', (e) => {
   const id = holder ? Number(holder.dataset.id) : null;
   const it = id ? state.byId.get(id) : null;
 
+  if (actName === 'call' || actName === 'whatsapp' || actName === 'map' || actName === 'open') flushSearchLog();
   if (actName === 'call' || actName === 'whatsapp' || actName === 'map') {
     track(id, actName);
     if (actName === 'whatsapp' && it && !it.v && act.dataset.ph) markSent(it.i, act.dataset.ph);
@@ -1388,6 +1402,7 @@ input.addEventListener('input', () => {
 $('#search-form').addEventListener('submit', (e) => {
   e.preventDefault();
   input.blur();
+  flushSearchLog();
 });
 
 $('#clear-q').addEventListener('click', () => {
