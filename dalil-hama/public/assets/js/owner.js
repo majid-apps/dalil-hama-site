@@ -1,6 +1,6 @@
 // دليل حماة — صفحة صاحب الرقم (/r/#رمز): «موافق، انشروا» أو تعديل أو إبلاغ أو حذف رقمه وحده أو بطاقته كاملة (migrations 0012 و0014 و0019).
 // الرمز بعد # فلا يصل إلى سجلات الخادم، ولا يتغير شيء إلا بضغط زر.
-import { rpc, esc, formatPhone } from './core.js';
+import { rpc, esc, formatPhone, fmtNum } from './core.js';
 
 const box = document.getElementById('box');
 const readToken = () => decodeURIComponent(location.hash.slice(1)).replace(/^t=/, '').trim();
@@ -74,6 +74,30 @@ function askReject() {
       <button class="btn btn-soft" type="button" data-act="back">رجوع</button></div></div>`;
 }
 
+/** موقع المحل من جوال صاحبه وهو فيه: يصل إلى «البلاغات» سطراً بصيغة ثابتة تقرؤها الإدارة (LOC_RE في admin.js) فتعتمده بزر */
+const locLine = (p) => `📍 موقع المحل: ${p.lat.toFixed(6)},${p.lng.toFixed(6)} (دقة ±${Math.round(p.acc)} م)`;
+function shopLocate(f) {
+  const st = f.querySelector('.o-loc-st');
+  const btn = f.querySelector('[data-act="loc"]');
+  const say = (t, bad = false) => { st.innerHTML = t; st.style.color = bad ? '#b42318' : ''; };
+  if (!f.elements.inshop.checked) { say('ضعوا علامة ✓ على «أنا الآن داخل المحل» أولاً.', true); return; }
+  if (!navigator.geolocation) { say('هذا المتصفح لا يدعم تحديد الموقع.', true); return; }
+  btn.disabled = true;
+  say('جارٍ تحديد الموقع… اسمحوا للمتصفح باستعمال الموقع إن سألكم.');
+  navigator.geolocation.getCurrentPosition((pos) => {
+    btn.disabled = false;
+    const p = { lat: pos.coords.latitude, lng: pos.coords.longitude, acc: pos.coords.accuracy || 0 };
+    f.elements.loc.value = locLine(p);
+    btn.textContent = '📍 إعادة تحديد الموقع';
+    say(p.acc > 100
+      ? `حُدّد الموقع لكن بدقة ضعيفة (±${fmtNum(Math.round(p.acc))} م). شغّلوا «الموقع الدقيق» في الجوال وقفوا قرب الباب ثم أعيدوا، أو احفظوه كما هو.`
+      : `✓ حُدّد موقع المحل (دقة ±${fmtNum(Math.round(p.acc))} م). سيُرسل عند الحفظ.`, p.acc > 100);
+  }, (err) => {
+    btn.disabled = false;
+    say(err.code === 1 ? 'لم يُسمح باستعمال الموقع. اسمحوا به من إعدادات المتصفح ثم أعيدوا.' : 'تعذّر تحديد الموقع. شغّلوا الموقع (GPS) في الجوال ثم أعيدوا.', true);
+  }, { enableHighAccuracy: true, timeout: 25000, maximumAge: 0 });
+}
+
 function editForm() {
   box.innerHTML = `<h1>تعديل البيانات</h1>
     <form class="o-form" id="o-edit" novalidate>
@@ -81,6 +105,14 @@ function editForm() {
       <label>الرقم<input class="input" name="phone" inputmode="tel" dir="ltr" maxlength="20" value="${esc(info.phone)}"></label>
       <label>العنوان<input class="input" name="address" maxlength="400" value="${esc(info.address || '')}" placeholder="الحي، الشارع، بجانب…"></label>
       <label>نبذة قصيرة <em>(اختياري)</em><textarea class="input" name="description" maxlength="600" rows="3">${esc(info.description || '')}</textarea></label>
+      <div style="border:1px dashed #d8d2c4;border-radius:14px;padding:10px 12px">
+        <p style="margin:0 0 4px"><b>📍 موقع المحل على الخريطة</b> <em>(اختياري)</em></p>
+        <p class="o-note" style="margin:0 0 8px">⚠️ اضغطوا الزر وأنتم <b>داخل المحل أو المعمل أو العيادة أو الصيدلية نفسها</b>، لا في البيت ولا في الطريق: موقع جوالكم في هذه اللحظة هو ما سيظهر للناس على الخريطة.</p>
+        <label style="display:flex;gap:8px;align-items:center;flex-direction:row;font-weight:600"><input type="checkbox" name="inshop" style="width:22px;height:22px;flex:none">أنا الآن داخل المحل</label>
+        <button class="btn btn-soft" type="button" data-act="loc" style="width:100%;margin-top:8px">📍 أرسل موقع المحل الآن</button>
+        <p class="o-loc-st" aria-live="polite" style="margin:6px 0 0"></p>
+        <input type="hidden" name="loc">
+      </div>
       <div class="o-acts"><button class="btn btn-primary btn-lg" type="submit">حفظ التعديل</button>
       <button class="btn btn-soft" type="button" data-act="back">رجوع</button></div>
     </form>`;
@@ -137,6 +169,7 @@ box.addEventListener('click', (e) => {
   else if (a === 'edit') editForm();
   else if (a === 'report') reportForm();
   else if (a === 'retry') load();
+  else if (a === 'loc') shopLocate(b.closest('form'));
 });
 box.addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -146,13 +179,21 @@ box.addEventListener('submit', async (e) => {
   try {
     if (f.id === 'o-edit') {
       const fd = new FormData(f);
-      const r = await rpc('owner_edit', { p_token: token, p_name: fd.get('name'), p_phone: fd.get('phone'), p_address: fd.get('address'), p_description: fd.get('description') });
+      const val = (k) => String(fd.get(k) || '').trim();
+      const loc = val('loc');
+      const changed = val('name') !== (info.name || '') || val('phone') !== (info.phone || '') || val('address') !== (info.address || '') || val('description') !== (info.description || '');
+      // الموقع يصل إلى «البلاغات» لتعتمده الإدارة (لا يغيّر البطاقة مباشرة)، وبقية الحقول تُحفظ فوراً كما كانت
+      if (loc) {
+        const rl = await rpc('owner_report', { p_token: token, p_text: `${loc}\nأرسله صاحب الرقم من رابط بطاقته ليُعتمد موقعاً على الخريطة.` });
+        if (!rl || !rl.ok) { btn.disabled = false; alert(ERR[rl && rl.error] || 'تعذّر إرسال الموقع، حاولوا مجدداً.'); return; }
+      }
+      const r = changed || !loc ? await rpc('owner_edit', { p_token: token, p_name: fd.get('name'), p_phone: fd.get('phone'), p_address: fd.get('address'), p_description: fd.get('description') }) : { ok: true };
       if (!r || !r.ok) { btn.disabled = false; alert(ERR[r && r.error] || 'تعذّر الحفظ، حاولوا مجدداً.'); return; }
       info.name = String(fd.get('name')).trim() || info.name;
       info.phone = r.phone || info.phone;
       info.address = String(fd.get('address')).trim();
       info.description = String(fd.get('description')).trim();
-      state('✅', 'تم حفظ التعديل', 'شكراً لكم، حُدّثت بطاقتكم في «دليل حماة».', '<div class="o-acts"><button class="btn btn-soft btn-lg" type="button" data-act="back">رجوع</button></div>');
+      state('✅', changed || !loc ? 'تم حفظ التعديل' : 'وصلنا موقع المحل', `شكراً لكم${changed || !loc ? '، حُدّثت بطاقتكم في «دليل حماة»' : ''}.${loc ? ' موقع المحل يظهر على الخريطة بعد مراجعته.' : ''}`, '<div class="o-acts"><button class="btn btn-soft btn-lg" type="button" data-act="back">رجوع</button></div>');
     } else if (f.id === 'o-report') {
       const r = await rpc('owner_report', { p_token: token, p_text: new FormData(f).get('text') });
       if (!r || !r.ok) { btn.disabled = false; alert(ERR[r && r.error] || 'تعذّر الإرسال، حاولوا مجدداً.'); return; }
