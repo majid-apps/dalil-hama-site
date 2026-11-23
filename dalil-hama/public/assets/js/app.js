@@ -942,9 +942,9 @@ function openItem(id) {
     ? `<div class="phone-row"><div class="num"><bdi dir="ltr">${esc(formatPhone(wa))}</bdi><span class="kind">واتساب</span></div><a class="btn btn-wa" href="${waHref(wa, waMsg(it, wa))}" target="_blank" rel="noopener" data-act="whatsapp" data-ph="${esc(wa)}">${I('wa', 'sm')}مراسلة</a></div>` : '';
   const cur = new URL(location.href);
   const ownerBox = cur.searchParams.get('w') === '1' ? ownerBoxHtml(it, (cur.hash.match(/^#p=(\d{4,15})$/) || [])[1] || '') : '';
-  // رابط رسالة التوثيق (w=1): صاحب الرقم يرى خياراته الثلاثة وحدها، بلا أزرار الزائر (اتصال، مفضلة، إبلاغ، طلب تعديل…)؛ والبطاقة كاملة برابط تحتها
-  const body = ownerBox ? `<div data-id="${it.i}">${ownerBox}
-    <a class="btn btn-ghost btn-block" href="/?l=${it.i}">عرض بطاقة النشاط في الدليل</a></div>` : `<div data-id="${it.i}">
+  // رابط رسالة التوثيق (w=1): صاحب الرقم يرى بطاقته كما تظهر في الدليل ثم خياراته الثلاثة تحتها،
+  // بلا أزرار الزائر (مفضلة، مشاركة، نسخ، إبلاغ، «هل هذا نشاطك؟») حتى لا تختلط بها
+  const body = `<div data-id="${it.i}">
     <div class="detail-hero" style="--hue:${catHue(cat)}">
       <div class="avatar" aria-hidden="true">${cat ? cat.ic : '📍'}</div>
       <div style="min-width:0"><h3>${esc(splitName(it.n)[0])}${it.v ? `<span class="badge" title="موثّق">${I('verified')}</span>` : ''}</h3>${splitName(it.n)[1] ? `<div class="detail-sub">${esc(splitName(it.n)[1])}</div>` : ''}
@@ -959,14 +959,14 @@ function openItem(id) {
       ${map ? `<a class="btn btn-soft" href="${esc(map)}" target="_blank" rel="noopener" data-act="map">${I('map', 'sm')}الخريطة</a>` : ''}</div></div>` : ''}
     ${safeUrl(it.s) ? `<div class="block"><div class="info-row">${I('globe')}<div class="grow"><a class="lnk" href="${esc(safeUrl(it.s))}" target="_blank" rel="noopener" dir="ltr">${esc(it.s.replace(/^https?:\/\//, '').replace(/\/$/, ''))}</a></div></div></div>` : ''}
     ${it.e ? `<div class="block"><p class="block-title">نبذة</p><div class="info-row">${I('info')}<div class="grow">${esc(it.e)}</div></div></div>` : ''}
-    <div class="detail-actions">
+    ${ownerBox ? `<div style="margin-top:14px">${ownerBox}</div>` : `<div class="detail-actions">
       <button class="qa" type="button" data-act="fav" aria-pressed="${state.favs.has(it.i)}">${I('heart')}المفضلة</button>
       <button class="qa" type="button" data-act="share">${I('share')}مشاركة</button>
       <button class="qa" type="button" data-act="copy-all">${I('copy')}نسخ</button>
       <button class="qa" type="button" data-act="report">${I('flag')}إبلاغ</button>
       ${adminOn() ? `<a class="qa" href="/admin/#edit/${it.i}">${I('edit')}تعديل (إدارة)</a>` : ''}
     </div>
-    <div class="owner-note">${I('edit')}<span style="flex:1">هل هذا نشاطك؟ حدّث بياناته أو أضف رقماً مجاناً.</span><button type="button" data-act="report" data-kind="wrong_info">طلب تعديل</button></div>
+    <div class="owner-note">${I('edit')}<span style="flex:1">هل هذا نشاطك؟ حدّث بياناته أو أضف رقماً مجاناً.</span><button type="button" data-act="report" data-kind="wrong_info">طلب تعديل</button></div>`}
   </div>`;
   showSheet(`item:${id}`, cat ? `${cat.ic} ${esc(cat.n)}` : 'التفاصيل', body, { label: it.n });
   state.recent = [id, ...state.recent.filter((x) => x !== id)].slice(0, 12);
