@@ -420,6 +420,7 @@ function renderChrome() {
     /^\w{1,32}$/.test(c.x || '') && `<a href="https://x.com/${esc(c.x)}" target="_blank" rel="noopener">${I('xx')}إكس</a>`,
     /^\w{3,64}$/.test(c.telegram || '') && `<a href="https://t.me/${esc(c.telegram)}" target="_blank" rel="noopener">${I('tg')}تلغرام</a>`,
     safeUrl(c.facebook) && `<a href="${esc(safeUrl(c.facebook))}" target="_blank" rel="noopener">${I('fb')}فيسبوك</a>`,
+    safeUrl(c.upscrolled) && `<a href="${esc(safeUrl(c.upscrolled))}" target="_blank" rel="noopener">${I('globe')}UpScrolled</a>`,
     `<button type="button" data-act="share-site">${I('share')}شارك الدليل</button>`,
   ].filter(Boolean).join('');
   updateFavDot();
