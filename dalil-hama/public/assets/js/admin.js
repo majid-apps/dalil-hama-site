@@ -1687,6 +1687,12 @@ function viewReports(el) {
     try {
       if (res) {
         const to = res.dataset.to;
+        // «تمت المعالجة» يغلق البلاغ فقط: إن بقي فيه تعديل أو موقع لم يُطبَّق نسأل أولاً (حدث أن أُغلق طلب «القصور» بدل «اعتماد التعديل»)
+        const rp0 = A.reports.find((x) => x.id === Number(res.dataset.res));
+        const l1 = rp0 && A.byId.get(rp0.listing_id);
+        const g1 = rp0 && reportLoc(rp0);
+        const pend = l1 && to === 'resolved' ? [...reportEdits(rp0).filter((c) => !editApplied(c, l1)).map(editText), ...(g1 && !(l1.lat === g1.lat && l1.lng === g1.lng) ? ['📍 موقع المحل'] : [])] : [];
+        if (pend.length && !(await confirmBox(`في هذا البلاغ ما لم يُطبَّق على البطاقة بعد:<br>${pend.join('<br>')}<br><br>«تمت المعالجة» يغلق البلاغ فقط ولا يغيّر البطاقة. لتطبيقه اضغط «اعتماد التعديل» أو «اعتماد الموقع». هل تغلقه دون تطبيق؟`, { ok: 'أغلق دون تطبيق' }))) return;
         const [row] = await rest(`reports?id=eq.${res.dataset.res}`, { method: 'PATCH', body: { status: to, resolved_at: to === 'open' ? null : new Date().toISOString() }, headers: rep });
         A.reports = A.reports.map((x) => (x.id === row.id ? row : x));
         toast('تم التحديث');
