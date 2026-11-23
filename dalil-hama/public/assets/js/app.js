@@ -1494,7 +1494,7 @@ function onScroll() { topbar.classList.toggle('on-hero', window.scrollY < hero.o
 window.addEventListener('scroll', onScroll, { passive: true });
 onScroll();
 
-$('#year').textContent = new Intl.NumberFormat('ar-SY', { useGrouping: false }).format(new Date().getFullYear());
+$('#year').textContent = new Intl.NumberFormat('ar-SY-u-nu-latn', { useGrouping: false }).format(new Date().getFullYear());
 
 // ─────────────── البدء ───────────────
 

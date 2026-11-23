@@ -628,7 +628,7 @@ const hasArabic = (t) => /[\u0600-\u06FF]/.test(t || '');
 const isLatinName = (r) => /[A-Za-z]/.test(r.name || '') && !hasArabic(r.name) && !(r.tags || []).some(hasArabic);
 const phonesHtml = (r) => (r.phones || []).map((p) => `<bdi dir="ltr">${esc(formatPhone(p))}</bdi>`).join(' · ') || '<span style="color:var(--danger)">بلا رقم</span>';
 const st = (s, map = STATUS) => `<span class="st ${s}">${map[s] || s}</span>`;
-const fmtDate = (d) => new Date(d).toLocaleString('ar-SY', { dateStyle: 'medium', timeStyle: 'short' });
+const fmtDate = (d) => new Date(d).toLocaleString('ar-SY-u-nu-latn', { dateStyle: 'medium', timeStyle: 'short' });
 
 /** أزرار التحكم بكل بطاقة: اتصال، واتساب، خريطة، عرض، دمج، حذف، تعديل */
 function rowOps(r) {

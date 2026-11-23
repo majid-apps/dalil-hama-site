@@ -125,7 +125,8 @@ export const waHref = (p, text = '') =>
 const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ESC[c]);
 
-export const fmtNum = (n) => new Intl.NumberFormat('ar-SY').format(n);
+// الأرقام بالعربية الغربية 1234567890 لا الهندية ١٢٣ (قرار مجيد 23/11): الامتداد -u-nu-latn في كل تنسيق عربي
+export const fmtNum = (n) => new Intl.NumberFormat('ar-SY-u-nu-latn').format(n);
 
 export function debounce(fn, ms) {
   let t;
@@ -209,10 +210,10 @@ export function mapHref(item) {
 
 export function timeAgo(date) {
   const s = (Date.now() - new Date(date).getTime()) / 1000;
-  const rtf = new Intl.RelativeTimeFormat('ar', { numeric: 'auto' });
+  const rtf = new Intl.RelativeTimeFormat('ar-u-nu-latn', { numeric: 'auto' });
   if (s < 60) return 'الآن';
   if (s < 3600) return rtf.format(-Math.round(s / 60), 'minute');
   if (s < 86400) return rtf.format(-Math.round(s / 3600), 'hour');
   if (s < 2592000) return rtf.format(-Math.round(s / 86400), 'day');
-  return new Date(date).toLocaleDateString('ar-SY');
+  return new Date(date).toLocaleDateString('ar-SY-u-nu-latn');
 }
