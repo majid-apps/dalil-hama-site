@@ -461,7 +461,7 @@ function renderHome() {
   }
   h += `<section class="section">${sectionHead('أُضيفت حديثاً')}<div class="rail">${newest.map((it) => card(it)).join('')}</div></section>`;
   h += `<section class="section"><div class="announce" style="background:var(--brand-soft);border-color:transparent;align-items:center;flex-wrap:wrap">
-      <div style="flex:1;min-width:220px"><b style="font-size:17px">هل لديك نشاط في حماة؟</b><br><span style="color:var(--ink-2)">أضفه مجاناً ليصل إليك الناس بسهولة. ووجدت رقماً خاطئاً؟ بلّغنا ونصحّحه فوراً.</span></div>
+      <div style="flex:1;min-width:220px"><b style="font-size:17px">هل لديك نشاط في حماة؟</b><br><span style="color:var(--ink-2)">أضفه ليصل إليك الناس بسهولة. ووجدت رقماً خاطئاً؟ بلّغنا ونصحّحه فوراً.</span></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap"><a class="btn btn-primary" href="#add">${I('plus', 'sm')}أضف نشاطك</a><a class="btn btn-soft" href="#report">${I('flag', 'sm')}إبلاغ عن خطأ</a></div>
     </div></section>`;
   return h;
@@ -478,7 +478,7 @@ function renderRural() {
     <section class="section">${sectionHead('تصفّح حسب البلدة')}<div class="cat-grid">${towns.map(townTile).join('')}</div></section>
     <section class="section">${sectionHead('تصفّح حسب التصنيف')}<div class="cat-grid">${cats.map(catTileR).join('')}</div></section>
     <section class="section"><div class="announce" style="background:var(--brand-soft);border-color:transparent;align-items:center;flex-wrap:wrap">
-      <div style="flex:1;min-width:220px"><b style="font-size:17px">هل لديك نشاط في ريف حماة؟</b><br><span style="color:var(--ink-2)">أضفه مجاناً واختر بلدتك من القائمة.</span></div>
+      <div style="flex:1;min-width:220px"><b style="font-size:17px">هل لديك نشاط في ريف حماة؟</b><br><span style="color:var(--ink-2)">أضفه واختر بلدتك من القائمة.</span></div>
       <a class="btn btn-primary" href="#add">${I('plus', 'sm')}أضف نشاطك</a></div></section>`;
 }
 
@@ -1018,7 +1018,7 @@ function openItem(id) {
       <button class="qa" type="button" data-act="report">${I('flag')}إبلاغ</button>
       ${adminOn() ? `<a class="qa" href="/admin/#edit/${it.i}">${I('edit')}تعديل (إدارة)</a>` : ''}
     </div>
-    <div class="owner-note">${I('edit')}<span style="flex:1">هل هذا نشاطك؟ حدّث بياناته أو أضف رقماً مجاناً.</span><button type="button" data-act="report" data-kind="wrong_info">طلب تعديل</button></div>`}
+    <div class="owner-note">${I('edit')}<span style="flex:1">هل هذا نشاطك؟ حدّث بياناته أو أضف رقماً.</span><button type="button" data-act="report" data-kind="wrong_info">طلب تعديل</button></div>`}
   </div>`;
   showSheet(`item:${id}`, cat ? `${cat.ic} ${esc(cat.n)}` : 'التفاصيل', body, { label: it.n });
   state.recent = [id, ...state.recent.filter((x) => x !== id)].slice(0, 12);
@@ -1035,7 +1035,7 @@ function openAdd() {
   const areaOpts = state.areas.filter((a) => !a.r).map((a) => `<option>${esc(a.n)}</option>`).join('')
     + (ruralAreas.length ? `<optgroup label="ريف حماة">${ruralAreas.map((a) => `<option>${esc(a.n)}</option>`).join('')}</optgroup>` : '');
   const body = `<form class="form" id="add-form" novalidate>
-    <p style="margin:0;color:var(--ink-2)">أضف نشاطك أو أي نشاط تعرفه في حماة مجاناً. نراجع الطلب ونتحقق من الرقم قبل النشر.</p>
+    <p style="margin:0;color:var(--ink-2)">أضف نشاطك أو أي نشاط تعرفه في حماة. نراجع الطلب ونتحقق من الرقم قبل النشر.</p>
     <label class="field"><span>اسم النشاط أو صاحب المهنة <i>*</i></span><input class="input" name="name" required minlength="2" maxlength="160" placeholder="مثال: صيدلية الشفاء"></label>
     <label class="field"><span>التصنيف <i>*</i></span><select class="input" name="category_id" required><option value="">اختر التصنيف…</option>${catOpts}</select></label>
     <div class="row2">
