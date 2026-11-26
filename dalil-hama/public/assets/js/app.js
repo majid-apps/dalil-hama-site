@@ -303,7 +303,7 @@ function dutyLink(url) {
   if (!u) return null;
   let host;
   try { host = new URL(u).hostname.replace(/^(www|m)\./, ''); } catch { return null; }
-  if (['chat.whatsapp.com', 'wa.me', 'whatsapp.com'].includes(host)) return { href: u, cls: 'btn-wa', icon: 'wa', label: 'جدول المناوبة على واتساب' };
+  if (['chat.whatsapp.com', 'wa.me', 'whatsapp.com'].includes(host)) return { href: u, cls: 'btn-wa', icon: 'wa', label: 'قناة جدول المناوبة على واتساب' };
   if (['facebook.com', 'fb.com', 'fb.me'].includes(host)) return { href: u, cls: 'btn-soft', icon: 'fb', label: 'جدول المناوبة على فيسبوك' };
   return null;
 }
@@ -316,7 +316,7 @@ function dutyHtml() {
   const list = inRange && Array.isArray(d.ids) ? d.ids.map((id) => state.byId.get(id)).filter(Boolean) : [];
   const link = dutyLink(d.link);
   if (!list.length && !link) return '';
-  const sub = list.length ? (d.note || 'اتصل قبل الذهاب للتأكد من المناوبة') : 'اطّلع على جدول الصيدليات المناوبة من الرابط';
+  const sub = list.length ? (d.note || 'اتصل قبل الذهاب للتأكد من المناوبة') : 'الجدول تصدره نقابة الصيادلة مساء كل سبت وتجده في هذه القناة';
   const btn = link ? `<div class="duty-link"><a class="btn ${link.cls}" href="${esc(link.href)}" target="_blank" rel="noopener noreferrer">${I(link.icon, 'sm')}${link.label}</a></div>` : '';
   return `<section class="section duty">${sectionHead('💊 صيدليات مناوبة', esc(sub))}${btn}${list.length ? `<div class="rail">${list.map((it) => card(it)).join('')}</div>` : ''}</section>`;
 }
