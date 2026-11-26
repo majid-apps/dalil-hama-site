@@ -1,6 +1,6 @@
 // دليل حماة — لوحة الإدارة
 import {
-  request, ApiError, esc, fmtNum, store, debounce, normalizePhone, formatPhone, isMobile, waHref, telHref, timeAgo, normalize, safeUrl, distance,
+  request, ApiError, esc, fmtNum, store, debounce, normalizePhone, toLatinDigits, formatPhone, isMobile, waHref, telHref, timeAgo, normalize, safeUrl, distance,
 } from './core.js';
 import { SearchIndex } from './search.js';
 
@@ -1920,6 +1920,9 @@ function editListing(id, preset = {}) {
       no_whatsapp: fd.has('no_whatsapp'),
     };
     if (body.name.length < 2) { err.textContent = 'الاسم مطلوب.'; err.hidden = false; return; }
+    // تنبيه عند كل إضافة: رقم حماة القديم 033 يتحوّل تلقائياً إلى 013
+    const conv033 = $$('.ph input', form).filter((i) => /^(00963|963|0)?33\d{7}$/.test(toLatinDigits(i.value).replace(/\D/g, '')));
+    if (conv033.length) toast(`حُوّل رقم حماة القديم 033 إلى 013 (${conv033.length})`);
     if ((body.lat === null) !== (body.lng === null)) { err.textContent = 'أدخل خط العرض والطول معاً أو اتركهما فارغين.'; err.hidden = false; return; }
     const odd = oddOk(body.admin_note) ? [] : body.phones.filter((p) => !/^0\d{9}$/.test(p));
     if (odd.length && !form.dataset.oddOk) {
