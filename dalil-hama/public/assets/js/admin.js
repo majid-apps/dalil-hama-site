@@ -2664,6 +2664,7 @@ function viewSettings(el) {
         <label class="field"><span>إكس / تويتر (اسم المستخدم)</span><input class="input" name="x" dir="ltr" value="${esc(c.x || '')}"></label>
         <label class="field"><span>تلغرام (اسم المستخدم)</span><input class="input" name="telegram" dir="ltr" value="${esc(c.telegram || '')}"></label>
         <label class="field full"><span>فيسبوك (رابط)</span><input class="input" name="facebook" dir="ltr" value="${esc(c.facebook || '')}"></label>
+        <label class="field full"><span>قناة واتساب (رابط)</span><input class="input" name="wachannel" dir="ltr" value="${esc(c.wachannel || '')}" placeholder="https://whatsapp.com/channel/…"></label>
         <label class="field full"><span>UpScrolled (رابط)</span><input class="input" name="upscrolled" dir="ltr" value="${esc(c.upscrolled || '')}" placeholder="https://upscrolled.com/@…"></label>
         <div class="full"><button class="btn btn-primary" ${owner ? '' : 'disabled'}>حفظ</button></div></form></div>
     <div class="panel"><h2>${I('settings')}تغيير كلمة المرور</h2>
@@ -2682,7 +2683,7 @@ function viewSettings(el) {
   $('#s-an').onsubmit = (e) => { e.preventDefault(); const fd = new FormData(e.target); saveSetting('announcement', { active: fd.has('active'), text: fd.get('text').trim(), link: fd.get('link').trim() }); };
   // اسم مستخدم من «@name» أو رابط (x.com/name · t.me/name) ← name
   const handle = (v) => String(v || '').trim().replace(/^https?:\/\/(www\.)?(x\.com|twitter\.com|t\.me)\//i, '').replace(/^@/, '').split(/[/?#]/)[0].trim();
-  $('#s-ct').onsubmit = (e) => { e.preventDefault(); const fd = new FormData(e.target); saveSetting('contact', { whatsapp: fd.get('whatsapp').replace(/\D/g, ''), instagram: fd.get('instagram').replace(/^@/, '').trim(), x: handle(fd.get('x')), telegram: handle(fd.get('telegram')), facebook: fd.get('facebook').trim(), upscrolled: fd.get('upscrolled').trim() }); };
+  $('#s-ct').onsubmit = (e) => { e.preventDefault(); const fd = new FormData(e.target); saveSetting('contact', { whatsapp: fd.get('whatsapp').replace(/\D/g, ''), instagram: fd.get('instagram').replace(/^@/, '').trim(), x: handle(fd.get('x')), telegram: handle(fd.get('telegram')), facebook: fd.get('facebook').trim(), upscrolled: fd.get('upscrolled').trim(), wachannel: fd.get('wachannel').trim() }); };
   // الصيدليات المناوبة: تُخزَّن معرّفاتها في الإعداد العام duty ويعرضها الدليل بين تاريخي البداية والنهاية
   let dutyIds = (duty.ids || []).filter((id) => A.byId.has(id));
   const dutyDraw = () => {
