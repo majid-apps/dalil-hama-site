@@ -50,7 +50,7 @@ const REPORT_KINDS = [
 
 const state = {
   items: [], byId: new Map(), cats: [], catById: new Map(), areas: [], settings: {}, counts: new Map(), areaCounts: new Map(),
-  // ريف حماة: counts/areaCounts للمدينة وحدها، وruralCounts/ruralAreaCounts للريف، وall* للاثنين معاً
+  // نواحي حماة: counts/areaCounts للمدينة وحدها، وruralCounts/ruralAreaCounts للريف، وall* للاثنين معاً
   city: [], rural: [], hasRural: false, ruralNames: new Set(), ruralCounts: new Map(), ruralAreaCounts: new Map(), allCounts: new Map(), allAreaCounts: new Map(),
   index: new SearchIndex(), favs: new Set(store.get('dh:favs', [])), recent: store.get('dh:recent', []),
   geo: store.get('dh:geo', null), list: [], terms: [], shown: 0, viewKey: '', loaded: false,
@@ -110,7 +110,7 @@ function applyData(data) {
   });
 }
 
-// الشاشات التي تبحث في الفهرس: بحث، تصنيف، حي، ريف حماة، الأقرب
+// الشاشات التي تبحث في الفهرس: بحث، تصنيف، حي، نواحي حماة، الأقرب
 function needsIndex(p) { return !!(p.q || p.c || p.a || p.v === 'near' || p.v === 'rural'); }
 
 function strip(data) {
@@ -261,7 +261,7 @@ window.addEventListener('popstate', () => {
 const catHue = (c) => (c ? (c.o * 4.7 + c.i * 31) % 360 : 170);
 const catOf = (it) => state.catById.get(it.c);
 
-// نطاق القائمة: المدينة (البحث العادي) | ريف حماة | الكل (الأقرب إليّ)
+// نطاق القائمة: المدينة (البحث العادي) | نواحي حماة | الكل (الأقرب إليّ)
 const scopeOf = (mode) => (mode === 'rural' ? 'rural' : mode === 'search' ? 'city' : 'all');
 const catCountsOf = (mode) => (mode === 'rural' ? state.ruralCounts : mode === 'search' ? state.counts : state.allCounts);
 const areaCountsOf = (mode) => (mode === 'rural' ? state.ruralAreaCounts : mode === 'search' ? state.areaCounts : state.allAreaCounts);
@@ -324,7 +324,7 @@ function dutyHtml() {
 function ruralCard() {
   const names = state.areas.filter((a) => a.r && state.ruralAreaCounts.get(a.n))
     .sort((a, b) => state.ruralAreaCounts.get(b.n) - state.ruralAreaCounts.get(a.n)).slice(0, 4).map((a) => a.n).join('، ');
-  return `<a class="portal" href="/?v=rural" data-nav="rural"><span class="em" aria-hidden="true">🌾</span><span class="txt"><b>ريف حماة</b><small>${esc(names)} وغيرها · ${fmtNum(state.rural.length)} نشاطاً</small></span>${I('chev')}</a>`;
+  return `<a class="portal" href="/?v=rural" data-nav="rural"><span class="em" aria-hidden="true">🌾</span><span class="txt"><b>نواحي حماة</b><small>${esc(names)} وغيرها · ${fmtNum(state.rural.length)} نشاطاً</small></span>${I('chev')}</a>`;
 }
 
 function waNumber(it) {
@@ -383,12 +383,12 @@ function render(p) {
   if (!state.loaded) return;
   if (!p.q) flushSearchLog(); // ترك البحث إلى صفحة أخرى
   const view = $('#view');
-  // ريف حماة: v=rural، أو رابط حيّ لبلدة ريفية (?a=سلمية) يُفتح في بوابة الريف
+  // نواحي حماة: v=rural، أو رابط حيّ لبلدة ريفية (?a=سلمية) يُفتح في بوابة الريف
   const rural = state.hasRural && (p.v === 'rural' || (!p.v && p.a && state.ruralNames.has(p.a)));
   $('#status').textContent = '';
   if (!state.indexReady && needsIndex(p)) { view.innerHTML = '<div class="section"><div class="list"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div></div>'; return; }
   updateHead(p, rural);
-  $('#q').placeholder = rural ? 'ابحث في ريف حماة…' : 'ابحث باسم، مهنة، حي أو رقم…';
+  $('#q').placeholder = rural ? 'ابحث في نواحي حماة…' : 'ابحث باسم، مهنة، حي أو رقم…';
   if (rural && !(p.q || p.c || p.a)) { setHeroCompact(true); view.innerHTML = renderRural(); }
   else if (rural) { setHeroCompact(true); renderList(p, 'rural'); }
   else if (p.v === 'cats') { setHeroCompact(true); view.innerHTML = renderCats(); }
@@ -403,11 +403,11 @@ function render(p) {
 function renderChrome() {
   const total = state.items.length;
   const nCats = state.cats.filter((c) => state.allCounts.get(c.i)).length;
-  $('#hero-stats').innerHTML = `<span><b>${fmtNum(total)}</b> رقماً وعنواناً</span><span><b>${fmtNum(nCats)}</b> تصنيفاً</span><span>${state.hasRural ? 'حماة وريفها' : 'حماة حصراً'}</span>`;
+  $('#hero-stats').innerHTML = `<span><b>${fmtNum(total)}</b> رقماً وعنواناً</span><span><b>${fmtNum(nCats)}</b> تصنيفاً</span><span>${state.hasRural ? 'حماة ونواحيها' : 'حماة حصراً'}</span>`;
   const byName = new Map(state.cats.map((c) => [c.n, c]));
   $('#quick').innerHTML = QUICK.map(([n, label]) => byName.get(n)).filter(Boolean)
     .map((c) => `<a class="chip-hero" href="/?c=${c.i}" data-cat="${c.i}"><span aria-hidden="true">${c.ic}</span>${esc(QUICK.find((x) => x[0] === c.n)[1])}</a>`).join('')
-    + (state.hasRural ? `<a class="chip-hero" href="/?v=rural" data-nav="rural"><span aria-hidden="true">🌾</span>ريف حماة</a>` : '');
+    + (state.hasRural ? `<a class="chip-hero" href="/?v=rural" data-nav="rural"><span aria-hidden="true">🌾</span>نواحي حماة</a>` : '');
   $('#nav-rural').hidden = !state.hasRural;
   $('#foot-rural').hidden = !state.hasRural;
   const an = state.settings.announcement;
@@ -475,12 +475,12 @@ function renderRural() {
   const cats = state.cats.filter((c) => state.ruralCounts.get(c.i)).sort(byCount(state.ruralCounts, (c) => c.i));
   const townTile = (a, i) => `<a class="cat" href="/?v=rural&a=${encodeURIComponent(a.n)}" style="--hue:${(i * 47 + 150) % 360}"><span class="em" aria-hidden="true">🏘️</span><b>${esc(a.n)}</b><small>${fmtNum(state.ruralAreaCounts.get(a.n))} نشاط</small></a>`;
   const catTileR = (c) => `<a class="cat" href="/?v=rural&c=${c.i}" data-cat="${c.i}" style="--hue:${catHue(c)}"><span class="em" aria-hidden="true">${c.ic}</span><b>${esc(c.n)}</b><small>${fmtNum(state.ruralCounts.get(c.i))} نشاط</small></a>`;
-  return `<div class="results-head"><div class="results-title"><a class="back" href="/" data-act="back" aria-label="رجوع">${I('back')}</a><h2>🌾 ريف حماة</h2><span class="count">${fmtNum(state.rural.length)} نشاطاً</span></div></div>
-    <p class="notice" style="margin-top:8px">أرقام وعناوين البلدات والقرى خارج مدينة حماة. استعمل شريط البحث للبحث داخل الريف وحده.</p>
+  return `<div class="results-head"><div class="results-title"><a class="back" href="/" data-act="back" aria-label="رجوع">${I('back')}</a><h2>🌾 نواحي حماة</h2><span class="count">${fmtNum(state.rural.length)} نشاطاً</span></div></div>
+    <p class="notice" style="margin-top:8px">أرقام وعناوين البلدات والقرى خارج مدينة حماة. استعمل شريط البحث للبحث داخل النواحي وحدها.</p>
     <section class="section">${sectionHead('تصفّح حسب البلدة')}<div class="cat-grid">${towns.map(townTile).join('')}</div></section>
     <section class="section">${sectionHead('تصفّح حسب التصنيف')}<div class="cat-grid">${cats.map(catTileR).join('')}</div></section>
     <section class="section"><div class="announce" style="background:var(--brand-soft);border-color:transparent;align-items:center;flex-wrap:wrap">
-      <div style="flex:1;min-width:220px"><b style="font-size:17px">هل لديك نشاط في ريف حماة؟</b><br><span style="color:var(--ink-2)">أضفه واختر بلدتك من القائمة.</span></div>
+      <div style="flex:1;min-width:220px"><b style="font-size:17px">هل لديك نشاط في نواحي حماة؟</b><br><span style="color:var(--ink-2)">أضفه واختر بلدتك من القائمة.</span></div>
       <a class="btn btn-primary" href="#add">${I('plus', 'sm')}أضف نشاطك</a></div></section>`;
 }
 
@@ -507,7 +507,7 @@ function renderList(p, mode) {
   } else {
     res = state.index.search(p.q, { cat: p.c, area: p.a, scope: scopeOf(mode) });
     list = res.results;
-    const pre = rural ? 'ريف حماة · ' : '';
+    const pre = rural ? 'نواحي حماة · ' : '';
     if (mode === 'near') {
       title = 'الأقرب إليك';
       list = list.filter((it) => it.y);
@@ -517,9 +517,9 @@ function renderList(p, mode) {
       const c = state.catById.get(p.c);
       title = `${pre}${c ? `${c.ic} ${esc(c.n)}` : 'النتائج'}`;
     } else if (p.a) {
-      title = rural ? `ريف حماة · ${esc(p.a)}` : `حي ${esc(p.a)}`;
+      title = rural ? `نواحي حماة · ${esc(p.a)}` : `حي ${esc(p.a)}`;
     } else if (rural) {
-      title = 'ريف حماة';
+      title = 'نواحي حماة';
     }
   }
   const sort = mode === 'near' ? 'near' : p.s;
@@ -562,7 +562,7 @@ function renderList(p, mode) {
     extra = `<div class="geo-bar"><span>${I('locate', 'sm')}المسافات من موقعك ${geoStale() ? 'السابق' : 'الحالي'}</span><button class="btn btn-soft" type="button" data-act="locate">${I('refresh', 'sm')}تحديث موقعي</button></div>`;
     if (geoStale() && !state.geoTried) { state.geoTried = true; locate(true); }
   }
-  // اقتراحات: تصنيفات وأحياء تطابق كلمة البحث، وعدد النتائج في ريف حماة إن وُجد
+  // اقتراحات: تصنيفات وأحياء تطابق كلمة البحث، وعدد النتائج في نواحي حماة إن وُجد
   const sug = [];
   if (p.q && !p.c) {
     for (const id of res.cats || []) {
@@ -578,13 +578,13 @@ function renderList(p, mode) {
   }
   if (mode === 'search' && p.q && state.hasRural && !res.phone) {
     const rr = state.index.search(p.q, { cat: p.c, scope: 'rural', noFuzzy: true }).results.length;
-    if (rr) sug.push(`<a href="/?v=rural&q=${encodeURIComponent(p.q)}${p.c ? `&c=${p.c}` : ''}">🌾 ${fmtNum(rr)} نتيجة في ريف حماة</a>`);
+    if (rr) sug.push(`<a href="/?v=rural&q=${encodeURIComponent(p.q)}${p.c ? `&c=${p.c}` : ''}">🌾 ${fmtNum(rr)} نتيجة في نواحي حماة</a>`);
   }
   // اسم بلدة ريفية بحرفه («سلمية»): عرض بوابتها أولاً بدل نتائج المدينة المتشابهة بالاسم
   if (mode === 'search' && p.q && !p.a) {
     const qn = normalize(p.q).replace(/^(حي|بلده|مدينه)\s+/, '');
     const town = [...state.ruralNames].find((n) => normalize(n) === qn && state.ruralAreaCounts.get(n));
-    if (town) extra += `<a class="portal" href="${areaHref(town)}" data-nav="rural"><span class="em" aria-hidden="true">🌾</span><span class="txt"><b>${esc(town)} — ريف حماة</b><small>${fmtNum(state.ruralAreaCounts.get(town))} نشاطاً · عرض كل أنشطتها</small></span>${I('chev')}</a>`;
+    if (town) extra += `<a class="portal" href="${areaHref(town)}" data-nav="rural"><span class="em" aria-hidden="true">🌾</span><span class="txt"><b>${esc(town)} — نواحي حماة</b><small>${fmtNum(state.ruralAreaCounts.get(town))} نشاطاً · عرض كل أنشطتها</small></span>${I('chev')}</a>`;
   }
   if (sug.length) extra += `<div class="cat-suggest">${sug.join('')}</div>`;
   if (res.fuzzy && list.length) extra += `<p class="notice">لم نجد تطابقاً تاماً، إليك أقرب النتائج:</p>`;
@@ -758,15 +758,15 @@ const metaDesc = document.querySelector('meta[name="description"]');
 const BASE_DESC = 'دليل حماة: ابحث عن أرقام وعناوين العيادات والصيدليات والمشافي والمطاعم والمحلات والخدمات في مدينة حماة، واتصل أو راسل بلمسة واحدة.';
 let pageTitle = BASE_TITLE;
 
-/** عنوان التبويب والوصف يتبعان الشاشة: «صيدليات في حماة — دليل حماة»، «ريف حماة · سلمية»، «نتائج «…»» */
+/** عنوان التبويب والوصف يتبعان الشاشة: «صيدليات في حماة — دليل حماة»، «نواحي حماة · سلمية»، «نتائج «…»» */
 function updateHead(p, rural) {
   const c = p.c ? state.catById.get(p.c) : null;
   let title = BASE_TITLE;
   let desc = BASE_DESC;
   if (rural) {
     const what = [c && c.n, p.a].filter(Boolean).join(' · ');
-    title = p.q ? `نتائج «${p.q}» في ريف حماة — دليل حماة` : `${what ? what + ' في ' : ''}ريف حماة — دليل حماة`;
-    desc = `أرقام وعناوين ${what || 'البلدات والقرى'} في ريف حماة${what ? '' : ': سلمية ومصياف والسقيلبية ومحردة وغيرها'}. اتصل أو راسل بلمسة واحدة.`;
+    title = p.q ? `نتائج «${p.q}» في نواحي حماة — دليل حماة` : `${what ? what + ' في ' : ''}نواحي حماة — دليل حماة`;
+    desc = `أرقام وعناوين ${what || 'البلدات والقرى'} في نواحي حماة${what ? '' : ': سلمية ومصياف والسقيلبية ومحردة وغيرها'}. اتصل أو راسل بلمسة واحدة.`;
   } else if (p.q) {
     title = `نتائج «${p.q}» — دليل حماة`;
   } else if (c) {
@@ -1009,7 +1009,7 @@ function openItem(id) {
       ${phones || `<div class="no-phone" style="min-height:52px"><span>لا يوجد رقم لهذا النشاط بعد</span><button type="button" data-act="addphone">تعرفه؟ أضفه</button></div>`}${waExtra}
     </div>
     ${it.d || it.a || map ? `<div class="block"><p class="block-title">العنوان والموقع</p>
-      <div class="info-row">${I('pin')}<div class="grow">${esc(it.d || (it.a ? `${isRural ? 'ريف حماة' : 'حماة'}، ${it.a}` : 'الموقع على الخريطة'))}${d !== null ? `<div class="meta"><span class="dist">يبعد عنك ${fmtDistance(d)}</span></div>` : ''}</div>
+      <div class="info-row">${I('pin')}<div class="grow">${esc(it.d || (it.a ? `${isRural ? 'نواحي حماة' : 'حماة'}، ${it.a}` : 'الموقع على الخريطة'))}${d !== null ? `<div class="meta"><span class="dist">يبعد عنك ${fmtDistance(d)}</span></div>` : ''}</div>
       ${map ? `<a class="btn btn-soft" href="${esc(map)}" target="_blank" rel="noopener" data-act="map">${I('map', 'sm')}الخريطة</a>` : ''}</div></div>` : ''}
     ${safeUrl(it.s) ? `<div class="block"><div class="info-row">${I('globe')}<div class="grow"><a class="lnk" href="${esc(safeUrl(it.s))}" target="_blank" rel="noopener" dir="ltr">${esc(it.s.replace(/^https?:\/\//, '').replace(/\/$/, ''))}</a></div></div></div>` : ''}
     ${it.e ? `<div class="block"><p class="block-title">نبذة</p><div class="info-row">${I('info')}<div class="grow">${esc(it.e)}</div></div></div>` : ''}
@@ -1035,7 +1035,7 @@ function openAdd() {
   const catOpts = state.cats.filter((c) => state.allCounts.get(c.i)).map((c) => `<option value="${c.i}">${c.ic} ${esc(c.n)}</option>`).join('');
   const ruralAreas = state.areas.filter((a) => a.r);
   const areaOpts = state.areas.filter((a) => !a.r).map((a) => `<option>${esc(a.n)}</option>`).join('')
-    + (ruralAreas.length ? `<optgroup label="ريف حماة">${ruralAreas.map((a) => `<option>${esc(a.n)}</option>`).join('')}</optgroup>` : '');
+    + (ruralAreas.length ? `<optgroup label="نواحي حماة">${ruralAreas.map((a) => `<option>${esc(a.n)}</option>`).join('')}</optgroup>` : '');
   const body = `<form class="form" id="add-form" novalidate>
     <p style="margin:0;color:var(--ink-2)">أضف نشاطك أو أي نشاط تعرفه في حماة. نراجع الطلب ونتحقق من الرقم قبل النشر.</p>
     <label class="field"><span>اسم النشاط أو صاحب المهنة <i>*</i></span><input class="input" name="name" required minlength="2" maxlength="160" placeholder="مثال: صيدلية الشفاء"></label>
