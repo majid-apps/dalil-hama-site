@@ -1208,12 +1208,12 @@ async function copy(text, msg = 'تم النسخ') {
 
 function itemText(it) {
   const cat = catOf(it);
-  return [it.n, cat && cat.n, ...(it.p || []).map((p) => `📞 ${p}`), (it.d || it.a) && `📍 ${it.d || it.a}`, mapHref(it)].filter(Boolean).join('\n');
+  return [it.n, cat && cat.n, ...(it.p || []).map((p) => `📞 ${p}`), (it.d || it.a) && `📍 ${it.d || it.a}`, mapHref(it) && `🗺 ${mapHref(it)}`, safeUrl(it.s) && `🌐 ${safeUrl(it.s)}`].filter(Boolean).join('\n');
 }
 
 async function share(it) {
   const url = `${location.origin}/?l=${it.i}`;
-  const text = `${it.n}${it.p ? ` — ${it.p[0]}` : ''}\nمن دليل حماة:`;
+  const text = `${itemText(it)}\nمن دليل حماة:`;
   track(it.i, 'share');
   if (navigator.share) {
     try { await navigator.share({ title: it.n, text, url }); return; } catch (e) { if (e.name === 'AbortError') return; }
