@@ -421,6 +421,7 @@ function renderChrome() {
     /^\w{3,64}$/.test(c.telegram || '') && `<a href="https://t.me/${esc(c.telegram)}" target="_blank" rel="noopener">${I('tg')}تلغرام</a>`,
     safeUrl(c.facebook) && `<a href="${esc(safeUrl(c.facebook))}" target="_blank" rel="noopener">${I('fb')}فيسبوك</a>`,
     safeUrl(c.wachannel) && `<a href="${esc(safeUrl(c.wachannel))}" target="_blank" rel="noopener" style="border-color:var(--brand);color:var(--brand);font-weight:700">${I('wa')}قناة الدليل على واتساب</a>`,
+    safeUrl(c.fbgroup) && `<a href="${esc(safeUrl(c.fbgroup))}" target="_blank" rel="noopener">${I('fb')}مجموعة الدليل على فيسبوك</a>`,
     safeUrl(c.upscrolled) && `<a href="${esc(safeUrl(c.upscrolled))}" target="_blank" rel="noopener">${I('globe')}UpScrolled</a>`,
     `<button type="button" data-act="share-site">${I('share')}شارك الدليل</button>`,
   ].filter(Boolean).join('');
