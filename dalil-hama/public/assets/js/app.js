@@ -490,7 +490,9 @@ function renderCats() {
   const areas = state.areas.filter((a) => state.areaCounts.get(a.n));
   return `<div class="results-head"><div class="results-title"><a class="back" href="/" data-act="back" aria-label="رجوع">${I('back')}</a><h2>كل التصنيفات</h2><span class="count">${fmtNum(cats.length)} تصنيفاً</span></div></div>
     ${state.hasRural ? ruralCard() : ''}
-    <div class="cat-grid" style="margin-top:8px">${cats.map(catTile).join('')}</div>
+    <input class="input" id="cat-filter" type="search" inputmode="search" autocomplete="off" aria-label="ابحث في التصنيفات" placeholder="ابحث في التصنيفات… (مثلاً: محامي، صيدلية، خردة)" style="margin-top:8px">
+    <div class="cat-grid" id="cat-grid" style="margin-top:8px">${cats.map(catTile).join('')}</div>
+    <p class="notice" id="cat-none" hidden>لا تصنيف بهذا الاسم. جرّب كلمة أخرى، أو اكتب ما تبحث عنه في خانة البحث أعلى الصفحة.</p>
     <section class="section">${sectionHead('الأحياء')}<div class="filters" style="flex-wrap:wrap;overflow:visible;margin:0;padding:0">${areas.map((a) => `<a class="pill" href="/?a=${encodeURIComponent(a.n)}">${esc(a.n)} <small style="opacity:.6">${fmtNum(state.areaCounts.get(a.n))}</small></a>`).join('')}</div></section>`;
 }
 
@@ -1178,6 +1180,20 @@ document.addEventListener('submit', (e) => {
   const err = f.querySelector('.form-error');
   if (text.length < 5) { err.textContent = 'لم يتغيّر شيء. عدّلوا معلومة أو اكتبوا ملاحظة أو أرسلوا موقع المحل.'; err.hidden = false; return; }
   ownerSignal(ob, it, ph, 'edit', text);
+});
+// البحث في صفحة «كل التصنيفات»: يطابق اسم التصنيف وكلماته (كل كلمة تكتبها يجب أن توجد)
+document.addEventListener('input', (e) => {
+  if (!e.target || e.target.id !== 'cat-filter') return;
+  const words = normalize(e.target.value).split(' ').filter(Boolean);
+  let shown = 0;
+  document.querySelectorAll('#cat-grid .cat').forEach((a) => {
+    const c = state.catById.get(Number(a.dataset.cat));
+    const hay = normalize(`${c ? c.n : ''} ${c && c.k ? c.k : ''}`);
+    const hit = words.every((w) => hay.includes(w));
+    a.style.display = hit ? '' : 'none';
+    if (hit) shown++;
+  });
+  $('#cat-none').hidden = shown > 0;
 });
 // يختفي تنبيه «لم يتغيّر شيء» مع أول تعديل
 document.addEventListener('input', (e) => {
